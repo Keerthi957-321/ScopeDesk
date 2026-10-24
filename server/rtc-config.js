@@ -8,8 +8,13 @@
 //   1) Cloudflare Realtime TURN (recommended, first 1,000 GB a month free):
 //        CLOUDFLARE_TURN_KEY_ID=<Turn Token ID>   CLOUDFLARE_TURN_API_TOKEN=<API Token>
 //      Credentials are created per request and expire exactly when the task window ends.
-//   2) Your own coturn (use-auth-secret):   TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349   TURN_SECRET=<secret>
-//   3) A provider with fixed credentials:   TURN_URLS=...   TURN_USERNAME=...   TURN_CREDENTIAL=...
+//   2) Metered (free account, sign-up gives an app name and an API key; the "Open Relay" free TURN):
+//        METERED_APP=<your app name, e.g. myapp for myapp.metered.live>   METERED_API_KEY=<API key>
+//      Metered's credentials are not tied to the task window, so direct connections are tried first and the relay is the fallback.
+//   3) Your own coturn (use-auth-secret):   TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349   TURN_SECRET=<secret>
+//   4) A provider with fixed credentials:   TURN_URLS=...   TURN_USERNAME=...   TURN_CREDENTIAL=...
+//
+// Why no built-in public username/password: shared "open" credentials stop working without notice and cannot expire with a task.
 //
 // Optional: STUN_URL, TURN_FORCE_RELAY=true|false (default: relay-only for 1 and 2, so the stream cannot outlive its credentials).
 const crypto = require('crypto');
@@ -18,7 +23,21 @@ const CF_API = 'https://rtc.live.cloudflare.com/v1/turn/keys';
 
 function relayConfigured(env = process.env) {
   const urls = String(env.TURN_URLS || '').trim();
-  return !!((env.CLOUDFLARE_TURN_KEY_ID && env.CLOUDFLARE_TURN_API_TOKEN) || (urls && env.TURN_SECRET) || (urls && env.TURN_USERNAME && env.TURN_CREDENTIAL));
+  return !!((env.CLOUDFLARE_TURN_KEY_ID && env.CLOUDFLARE_TURN_API_TOKEN) || (validMeteredApp(env.METERED_APP) && env.METERED_API_KEY) || (urls && env.TURN_SECRET) || (urls && env.TURN_USERNAME && env.TURN_CREDENTIAL));
+}
+
+// Metered: GET https://<app>.metered.live/api/v1/turn/credentials?apiKey=<key> answers with an array of ICE servers.
+// The app name is only ever used as a sub-domain of metered.live (letters, digits, dashes), so it cannot point the server anywhere else.
+const validMeteredApp = (v) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(String(v || '').trim());
+async function meteredIceServers({ app, apiKey, fetchFn, timeoutMs = 5000 }) {
+  const res = await fetchFn(`https://${String(app).trim().toLowerCase()}.metered.live/api/v1/turn/credentials?apiKey=${encodeURIComponent(apiKey)}`, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) throw new Error(`Metered TURN answered ${res.status}`);
+  const data = await res.json();
+  const servers = (Array.isArray(data) ? data : [])
+    .map((s) => ({ ...s, urls: [].concat(s.urls || []).filter((u) => !/:53(\?|$)/.test(u)) }))
+    .filter((s) => s.urls.length > 0);
+  if (!servers.some((s) => s.username && s.credential)) throw new Error('Metered TURN returned no credentials');
+  return servers;
 }
 
 // Cloudflare answers with { iceServers: [...] } (or a single object). Port 53 entries are dropped: browsers refuse that port.
@@ -52,6 +71,15 @@ async function buildRtcConfig({ userId, expiresAtMs, env = process.env, fetchFn 
       relay = true; hardExpiry = true; policyRelay = forceRelay !== 'false';
     } catch (err) {
       log.error('[RTC] Cloudflare TURN failed, falling back to STUN only:', err.message);   // never log the token
+    }
+  }
+
+  if (!relay && validMeteredApp(env.METERED_APP) && env.METERED_API_KEY) {
+    try {
+      iceServers.push(...await meteredIceServers({ app: env.METERED_APP, apiKey: env.METERED_API_KEY, fetchFn }));
+      relay = true; policyRelay = forceRelay === 'true';   // fixed-lifetime credentials: direct first, relay as the fallback
+    } catch (err) {
+      log.error('[RTC] Metered TURN failed, falling back to STUN only:', err.message);   // never log the key
     }
   }
 

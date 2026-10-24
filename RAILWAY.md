@@ -51,4 +51,7 @@ Symptom without it: the Vendor window stays on "Connecting..." and the Client se
 1. Create a free Cloudflare account, open **Realtime > TURN Server** and create a TURN key. Copy the **Turn Token ID** and the **API Token**.
 2. In Railway > Variables add `CLOUDFLARE_TURN_KEY_ID` (the Token ID) and `CLOUDFLARE_TURN_API_TOKEN` (the API Token). Railway redeploys by itself.
 3. Check `/api/health` again: it must show `"relay":true`. Credentials are created per session and expire when the task time ends.
-(Your own coturn server or another provider also works: see `.env.example`.)
+
+**No Cloudflare? Use Metered (free account) instead.** Sign up at metered.ca, create an app, and open its TURN Server page. Add the Railway variables `METERED_APP` (your app name, the part before `.metered.live`) and `METERED_API_KEY`. Check `/api/health` shows `"relay":true`.
+Cloudflare is the better choice (larger free allowance, and its credentials expire exactly when the task ends), but both work.
+Do not paste shared "open" usernames/passwords from the internet into the code: they stop working without warning and cannot expire with a task. Your own coturn server or another provider also works: see `.env.example`.
