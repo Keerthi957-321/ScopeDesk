@@ -1,6 +1,18 @@
-# Railway build recipe. `npm install` (not `npm ci`) so a lock file that is out of step with package.json can never fail the build.
+# Railway build recipe for the ScopeDesk cloud service ONLY (server.js: website, API, Socket.IO signaling, DB sync).
+# The desktop app (desktop/ + agent/) is built locally on a PC and is never built or installed on Railway.
+
+[phases.setup]
+# node:sqlite (used by db.js) needs Node 22.13 or newer.
+nixPkgs = ["nodejs_22"]
+
 [phases.install]
+# Root package.json only: express, socket.io, cors, bcryptjs, jsonwebtoken, nodemailer.
+# `npm install` (not `npm ci`) so a lock file that is out of step can never fail the build.
 cmds = ["npm install --omit=dev --no-audit --no-fund"]
+
+[phases.build]
+# Nothing to compile on the server. Replaces the default `npm run build`.
+cmds = ["echo 'Building cloud signaling architecture successfully'"]
 
 [start]
 cmd = "node server.js"

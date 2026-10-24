@@ -56,3 +56,6 @@ Symptom without it: the Vendor window stays on "Connecting..." and the Client se
 **No Cloudflare? Use Metered (free account) instead.** Sign up at metered.ca, create an app, and open its TURN Server page. Add the Railway variables `METERED_APP` (your app name, the part before `.metered.live`) and `METERED_API_KEY`. Check `/api/health` shows `"relay":true`.
 Cloudflare is the better choice (larger free allowance, and its credentials expire exactly when the task ends), but both work.
 Do not paste shared "open" usernames/passwords from the internet into the code: they stop working without warning and cannot expire with a task. Your own coturn server or another provider also works: see `.env.example`.
+
+## Why `npm run build` on Railway is only an `echo`
+Railway runs the root `build` script. It must never touch `desktop/` (Electron, electron-builder, native modules), which cannot be compiled in a headless container. The root `build` script and `nixpacks.toml` skip it; installers are built on a PC with `npm run desktop:build` (or `cd desktop && npm run dist`).

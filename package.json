@@ -4,15 +4,16 @@
   "description": "ScopeDesk: Secure Task-Bounded Remote Support Desktop Application",
   "scripts": {
     "start": "node server.js",
+    "build": "echo 'Skipping desktop asset compilation on cloud container layer'",
     "dev": "node --watch server.js",
     "setup-email": "node setup-email.js",
     "find-alerts": "node tools/find-alerts.js",
     "test": "node --test \"server/test/*.test.js\"",
+    "test:all": "npm test && npm --prefix desktop test && npm --prefix agent test",
     "desktop": "npm --prefix desktop start",
-    "build": "npm --prefix desktop install --no-audit --no-fund && npm --prefix desktop run build",
-    "build:win": "npm --prefix desktop install --no-audit --no-fund && npm --prefix desktop run build:win",
-    "build:mac": "npm --prefix desktop install --no-audit --no-fund && npm --prefix desktop run build:mac",
-    "test:all": "npm test && npm --prefix desktop test && npm --prefix agent test"
+    "desktop:build": "npm --prefix desktop install --no-audit --no-fund && npm --prefix desktop run build",
+    "desktop:build:win": "npm --prefix desktop install --no-audit --no-fund && npm --prefix desktop run build:win",
+    "desktop:build:mac": "npm --prefix desktop install --no-audit --no-fund && npm --prefix desktop run build:mac"
   },
   "engines": {
     "node": ">=22.13.0"
