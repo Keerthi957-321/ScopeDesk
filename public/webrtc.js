@@ -20,7 +20,7 @@
 // SECURITY LOCKOUT: when the agent reports an out-of-scope app or folder, the desktop app raises a native OS notification and
 // sends 'lockout' here. We immediately freeze the data channels, close the peer connection and show the locked state.
 (function () {
-  let api = null, socket = null, onChange = () => {};
+  let api = null, socket = null, onChange = () => {}, isClientFn = () => false, onPermission = () => {};
   let role = null, taskId = null, iceCfg = null;
   let pc = null, stream = null, pendingIce = [], earlyIce = [];
   let sdpSent = false, outIce = [];          // outgoing candidates wait only until our own SDP has been sent, then flow instantly
@@ -63,7 +63,52 @@
 
   function init(opts) {
     api = opts.api; onChange = opts.onChange || onChange;
+    if (typeof opts.isClient === 'function') isClientFn = opts.isClient;      // the Client dashboard asks for alert permission; the Vendor never does
+    if (typeof opts.onPermission === 'function') onPermission = opts.onPermission;
     console.log('[ScopeDesk] WebRTC Engine Initialized'); // developer console only, never a popup
+  }
+
+  // ---------- native notifications (Client only) ----------
+  // 1. Permission: asked as soon as the Client dashboard connects. Browsers that insist on a click (Safari) get it on the first click.
+  // 2. Alert: when the session is terminated or a breach is signalled, a persistent system notification is raised.
+  let notifyAsked = false, lastNotifyAt = 0;
+  function requestNotificationPermission() {
+    try {
+      if (!('Notification' in window)) return Promise.resolve('unsupported');
+      if (Notification.permission !== 'granted' && Notification.permission !== 'denied') {
+        const done = () => { try { onPermission(Notification.permission); } catch (_) { /* optional */ } return Notification.permission; };
+        const res = Notification.requestPermission(done);                 // older browsers use the callback, newer ones the promise
+        if (res && typeof res.then === 'function') res.then(done).catch(() => {});
+        if (!notifyAsked) {                                                // still undecided (no gesture yet): ask again on the first click
+          notifyAsked = true;
+          document.addEventListener('pointerdown', () => { if (Notification.permission === 'default') requestNotificationPermission(); }, { once: true });
+        }
+      }
+      return Promise.resolve(Notification.permission);
+    } catch (_) { return Promise.resolve('unsupported'); }
+  }
+
+  function notifyTerminated(info) {
+    try {
+      if (!isClientFn() || !('Notification' in window) || Notification.permission !== 'granted') return false;
+      const reason = (info && info.reason) || 'terminated';
+      if (reason === 'client_terminated' || reason === 'completed') return false;   // the Client (or the vendor, normally) ended it: no alarm needed
+      const now = Date.now();
+      if (now - lastNotifyAt < 3000) return false;                                   // several signals for one event show one alert
+      lastNotifyAt = now;
+      const expired = reason === 'time_expired';
+      const n = new Notification(expired ? 'ScopeDesk: Session Ended' : 'ScopeDesk: Session Terminated!', {
+        body: expired
+          ? 'The approved time window has ended. Remote access has been closed.'
+          : 'Security breach or manual termination detected. Remote access has been permanently revoked.' + (info && info.detail ? ` (${info.detail})` : ''),
+        icon: '/assets/warning-icon.png',
+        tag: 'scopedesk-session-terminated',   // same tag = replaces an older alert instead of stacking
+        renotify: true,
+        requireInteraction: true               // stays on screen until clicked
+      });
+      n.onclick = () => { try { window.focus(); } catch (_) { /* optional */ } n.close(); };
+      return true;
+    } catch (_) { return false; }               // the on-page alert and lock screen still show
   }
 
   // ---------- desktop app wiring (Client side) ----------
@@ -85,19 +130,27 @@
     if (role) stop('violation');             // 2. sever the WebRTC link (also stops screen capture)
     frozen = true;                           // stop() cleared state; keep the freeze until the session is resumed or ended
     set({ halted: 'violation', locked: true, lockout: detail || null });
+    if (!desktop) notifyTerminated({ reason: 'security_violation', taskId: was });   // the desktop app already raised its own OS notification
     return was;
   }
 
   // Called by script.js every time it (re)creates the app socket
   function bindSocket(s) {
     socket = s;
+    if (isClientFn()) requestNotificationPermission();            // Client dashboard is up: ask to allow notifications now
     s.on('webrtc-peer-joined', (d) => { if (role === 'host' && d.role === 'vendor') makeOffer(); });
     s.on('webrtc-peer-left', () => { if (role === 'host') closePeer(); set({ conn: 'waiting' }); });
     s.on('webrtc-signal', onSignal);
-    s.on('webrtc-close', (d) => { if (taskId && d.taskId === taskId) stop(d.reason === 'security_violation' ? 'violation' : 'closed'); });
+    s.on('webrtc-close', (d) => {
+      if (taskId && d.taskId === taskId) {
+        const wasHost = role === 'host';
+        stop(d.reason === 'security_violation' ? 'violation' : 'closed');
+        if (wasHost) notifyTerminated({ reason: d.reason, taskId: d.taskId });
+      }
+    });
     s.on('agent-status', (d) => { if (d.taskId === taskId) set({ agent: d.online ? 'waiting' : 'offline' }); });
     s.on('agent-state', (d) => { if (d.taskId === taskId) set({ agent: d.state, policy: d.policy || view.policy }); });
-    s.on('control-halt', (d) => { if (d.taskId === taskId) { if (d.reason === 'violation') { frozen = true; closeChannels(); } set({ halted: d.reason, locked: !!d.permanent }); } });
+    s.on('control-halt', (d) => { if (d.taskId === taskId) { if (d.reason === 'violation') { frozen = true; closeChannels(); notifyTerminated({ reason: 'security_violation', taskId: d.taskId }); } set({ halted: d.reason, locked: !!d.permanent }); } });
     s.on('control-resume', (d) => { if (d.taskId === taskId) { frozen = false; set({ halted: null, locked: false }); } });
     // After a dropped connection the server forgot our room membership: join again
     s.on('connect', () => { if (role && taskId) join().catch(() => {}); });
@@ -409,5 +462,5 @@
   // Kept so older pages that still call them do not break. The local WebSocket bridge (ws://127.0.0.1:47600) is gone:
   // the desktop app passes input over Electron IPC, so no port is opened on the Client's PC.
   const noop = () => {};
-  window.ScopeDeskRTC = { init, bindSocket, startHost, startViewer, stop, openFolder, fetchRtcConfig: (id) => loadIceConfig(id), peerConfig, setAgentToken: noop, startBridge: noop, stopBridge: noop, isActive: () => !!role, current: () => ({ role, taskId }) };
+  window.ScopeDeskRTC = { init, bindSocket, requestNotificationPermission, notifyTerminated, startHost, startViewer, stop, openFolder, fetchRtcConfig: (id) => loadIceConfig(id), peerConfig, setAgentToken: noop, startBridge: noop, stopBridge: noop, isActive: () => !!role, current: () => ({ role, taskId }) };
 })();

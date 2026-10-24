@@ -537,7 +537,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (STATE.user.role === 'client') {
             // CLIENT receives the alert
             socket.on('violation-alert', showViolationModal);
+            // The vendor who ACCEPTED the ticket + the approved time window: bind them to the "Assigned Task" bar at once
+            socket.on('task-started', (d) => applyTaskStarted(d));
             socket.on('session-connected', async (d) => {
+                applyTaskStarted(d);
                 await loadTasks();
                 if (d.windowEnd) STATE.clockOffset = d.serverTime - Date.now();
                 openShareModal(d); // sharing needs a click, so ask for it right away
@@ -546,6 +549,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (STATE.live && STATE.live.taskId === d.taskId) clearLive();
                 if (STATE.pendingViolation && STATE.pendingViolation.taskId === d.taskId) closeViolationModal();
                 // These are about ONE task. Your own login stays active.
+                ScopeDeskRTC.notifyTerminated({ reason: d.reason, taskId: d.taskId, title: d.title });
                 if (d.reason === 'time_expired') toast(`Task "${d.title || '#' + d.taskId}" has expired (its time window ended). You are still signed in.`);
                 else if (d.reason !== 'client_terminated') toast(d.message || 'Session ended.');
                 loadTasks();
@@ -561,7 +565,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 toast(`Session closed: ${d.message || 'terminated.'}`, true);
                 loadTasks();
             });
-            socket.on('task-request', (d) => { if (!d.replay) toast(`New support request from ${d.client}: ${d.title}`); loadTasks(); });
+            socket.on('task-request', (d) => { if (!d.replay) toast(`New support request from ${d.clientName || d.client}: ${d.title}`); loadTasks(); });
+            // Accepted (this tab or another tab of the same vendor account): who sent it + the time window
+            socket.on('task-accepted', (d) => applyTaskAccepted(d));
             socket.on('connect', () => loadTasks());   // after any (re)connection: catch up on requests sent while offline
             clearInterval(STATE.vendorPoll);
             STATE.vendorPoll = setInterval(() => { if (STATE.user && STATE.user.role === 'vendor' && !document.hidden) loadTasks(); }, 15000);   // safety net behind the socket event
@@ -602,14 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Browser notification, so the alert is seen even when ScopeDesk is not the window in front
     // (permission has to be granted from a click: see the "Enable alerts" button)
     function notifyViolation(alert) {
-        try {
-            if (!('Notification' in window) || Notification.permission !== 'granted') return;
-            const n = new Notification('ScopeDesk: access terminated', {
-                body: `${alert.vendor || 'The vendor'}: ${alert.what || alert.processName || 'out-of-scope activity'}. Open ScopeDesk to terminate access.`,
-                tag: 'scopedesk-violation', requireInteraction: true
-            });
-            n.onclick = () => { window.focus(); n.close(); };
-        } catch (_) { /* the on-page alert still shows */ }
+        ScopeDeskRTC.notifyTerminated({ reason: 'security_violation', taskId: alert.taskId, title: alert.taskTitle, detail: `${alert.vendor || 'The vendor'}: ${alert.what || alert.processName || 'out-of-scope activity'}` });
     }
     function syncAlertsButton() {
         const b = $('btnEnableAlerts');
@@ -687,7 +686,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const row = document.createElement('tr');
                 row.innerHTML = `
                     <td class="bold">${esc(t.title)}<br><small>${esc(t.target_process)}${t.task_type ? ' · ' + esc(t.task_type) : ''}${t.allowed_paths || t.allowed_apps ? ' · custom scope' : ''}</small></td>
-                    <td>${esc(t.vendor_name)}</td>
+                    <td>${esc(t.session_vendor_name || t.vendor_name)}</td>
                     <td><code class="token-code">${esc(t.token)}</code></td>
                     <td>${statusBadge(t)}</td>
                     <td>${canTerminate ? `<button class="btn-table-action" data-terminate="${t.id}">${t.status === 'pending' ? 'Revoke' : 'Terminate'}</button>` : '-'}</td>`;
@@ -702,7 +701,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const row = document.createElement('tr');
                 row.innerHTML = `
                     <td class="bold">${esc(t.title)}<br><small>${esc(t.target_process)}${t.task_type ? ' · ' + esc(t.task_type) : ''}${t.allowed_paths || t.allowed_apps ? ' · custom scope' : ''}</small></td>
-                    <td>${esc(t.client_org || 'Client')}</td>
+                    <td>Request from: <b>${esc(clientNameOf(t))}</b><br><small>${esc(windowText(t.window_start, t.window_end, t.duration_minutes))}</small></td>
                     <td>${statusBadge(t)}</td>
                     <td>${live ? `<button class="btn-table-action" data-open="${t.id}">Open Console</button>`
                         : canAccept ? `<button class="btn-table-action" data-accept="${t.id}">Accept &amp; Connect</button>` : '-'}</td>`;
@@ -722,7 +721,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (accept) {
             try {
                 const data = await api('/api/sessions/connect', { method: 'POST', body: { task_id: Number(accept.dataset.accept) } });
-                openVendorSession(data.session, data.task);
+                openVendorSession(data.session, data.task, data.meta);
                 loadTasks();
             } catch (err) {
                 toast(err.message, true);
@@ -939,7 +938,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         try {
             const data = await api('/api/sessions/connect', { method: 'POST', body: { token } });
-            openVendorSession(data.session, data.task);
+            openVendorSession(data.session, data.task, data.meta);
             loadTasks();
         } catch (err) {
             tokenErrorFeedback.textContent = '❌ ' + err.message;
@@ -947,15 +946,56 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    function openVendorSession(session, task) {
+    // ---- metadata shown in the "Assigned Task" views (both roles) ----
+    const clientNameOf = (t) => (t && (t.clientName || t.client_org || t.client_username)) || 'Client';
+    const clockTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    // "10:00 - 10:30 (30 min)". Accepts a start/end as a date string (database) or milliseconds.
+    function windowText(start, end, minutes) {
+        const a = typeof start === 'number' ? start : parseDbTime(start), b = typeof end === 'number' ? end : parseDbTime(end);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return minutes ? `${minutes} min` : '-';
+        return `${clockTime(a)} - ${clockTime(b)}${minutes ? ` (${minutes} min)` : ''}`;
+    }
+
+    // Vendor side: write "Request from: <client>", the time window and the countdown
+    function paintVendorMeta() {
+        const l = STATE.live;
+        if (!l || !STATE.user || STATE.user.role !== 'vendor') return;
+        $('lblScopeClient').textContent = `Request from: ${l.clientName || '-'}`;
+        $('lblScopeWindow').textContent = l.startMs ? windowText(l.startMs, l.endMs, l.durationMinutes) : '-';
+        tickClocks();
+    }
+    function applyTaskAccepted(d) {
+        if (!d || !STATE.live || STATE.live.taskId !== d.taskId) return;
+        if (d.serverTime) STATE.clockOffset = d.serverTime - Date.now();
+        Object.assign(STATE.live, { clientName: d.clientName, startMs: d.startTime, endMs: d.endTime || d.windowEnd, durationMinutes: d.durationMinutes });
+        paintVendorMeta();
+    }
+    // Client side: the vendor who really accepted the ticket replaces any stale name
+    function applyTaskStarted(d) {
+        if (!d || !STATE.user || STATE.user.role !== 'client') return;
+        if (d.serverTime) STATE.clockOffset = d.serverTime - Date.now();
+        STATE.live = { taskId: d.taskId, title: d.title, vendor: d.vendorName, vendorId: d.vendorId, process: d.targetProcess, startMs: d.startTime, endMs: d.endTime || d.windowEnd, durationMinutes: d.durationMinutes };
+        renderLiveBar();
+        tickClocks();
+    }
+
+    function openVendorSession(session, task, meta) {
         STATE.session = { session, task };
+        const m = meta || {};
         $('lblScopeTask').textContent = task.title;
         $('lblScopeVendor').textContent = STATE.user.username;
         $('lblScopeToken').textContent = `Task #${task.id}`;
         $('lblScopeProcess').textContent = task.target_process;
         $('emulatorWindowTitle').textContent = `Remote screen [Task #${task.id} - ${task.target_process}]`;
         routeToPanel('sessionMonitorPanel');
-        STATE.live = { taskId: task.id, title: task.title, process: task.target_process, endMs: Date.parse(task.window_end) };
+        STATE.live = {
+            taskId: task.id, title: task.title, process: task.target_process,
+            clientName: m.clientName || clientNameOf(task),
+            startMs: m.startTime || parseDbTime(task.window_start), endMs: m.endTime || parseDbTime(task.window_end),
+            durationMinutes: m.durationMinutes || task.duration_minutes
+        };
+        if (m.serverTime) STATE.clockOffset = m.serverTime - Date.now();
+        paintVendorMeta();
         syncVendorNav();
         renderVendorState({ conn: 'idle', agent: 'unknown', halted: null }); // stage hidden until the client's screen is live
         tickClocks();
@@ -1036,6 +1076,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ================= 7. SESSION CLOCK + LIVE SESSION UI =================
+    // Database timestamps are UTC; "2026-10-24 10:00:00" has no zone marker, so add one before parsing
+    const parseDbTime = (v) => { const x = String(v || ''); return Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(x) ? x.replace(' ', 'T') : x.replace(' ', 'T') + 'Z'); };
     const pad = (n) => String(n).padStart(2, '0');
     const fmt = (ms) => { const t = Math.max(0, Math.ceil(ms / 1000)); return `${pad(Math.floor(t / 60))}:${pad(t % 60)}`; };
     let expiredHandled = null;
@@ -1044,7 +1086,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const live = STATE.live;
         const label = live ? fmt(live.endMs - (Date.now() + STATE.clockOffset)) : '--:--';
         const left = live ? live.endMs - (Date.now() + STATE.clockOffset) : Infinity;
-        ['vendorClock', 'liveClock'].forEach((id) => {
+        ['vendorClock', 'liveClock', 'lblScopeClock'].forEach((id) => {
             const node = $(id);
             if (!node) return;
             node.textContent = label;
@@ -1075,7 +1117,12 @@ document.addEventListener('DOMContentLoaded', () => {
     function syncClientLive() {
         const t = STATE.tasks.find((x) => x.status === 'active');
         if (!t) { if (STATE.live) clearLive(); return; }
-        STATE.live = { taskId: t.id, title: t.title, vendor: t.vendor_name, process: t.target_process, endMs: Date.parse(t.window_end) };
+        STATE.live = {
+            taskId: t.id, title: t.title, process: t.target_process,
+            vendor: t.session_vendor_name || t.vendor_name,       // the vendor who accepted (never the label written when the ticket was created)
+            vendorId: t.session_vendor_id || t.vendor_id,
+            startMs: parseDbTime(t.window_start), endMs: parseDbTime(t.window_end), durationMinutes: t.duration_minutes
+        };
         syncAlertsButton();
         renderLiveBar();
         startDesktopAgent(false);   // desktop app: start the host agent by itself, nothing to copy or run
@@ -1109,6 +1156,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!live) return;
         $('liveTask').textContent = live.title;
         $('liveVendor').textContent = live.vendor || 'vendor';
+        if ($('liveWindow')) $('liveWindow').textContent = live.startMs ? windowText(live.startMs, live.endMs, live.durationMinutes) : '-';
         const v = STATE.rtcView || { conn: 'idle', agent: 'unknown' };
         const sharing = ['starting', 'waiting', 'connecting', 'live', 'lost'].includes(v.conn);
         $('liveShare').textContent = (SHARE_TEXT[v.conn] || v.conn)
@@ -1198,6 +1246,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     ScopeDeskRTC.init({
         api: (path) => api(path),
+        isClient: () => !!(STATE.user && STATE.user.role === 'client'),
+        onPermission: () => syncAlertsButton(),
         onChange: (v) => {
             STATE.rtcView = v;
             if (STATE.user && STATE.user.role === 'client') showLocalLockScreen(v);

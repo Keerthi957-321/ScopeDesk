@@ -422,7 +422,7 @@ async function deliverPendingRequests(user, socket) {
   const now = Date.now();
   for (const r of rows) {
     if (parseDbDate(r.window_end).getTime() <= now) continue;
-    socket.emit('task-request', { taskId: r.id, title: r.title, client: r.client_org || r.client_name, duration: r.duration_minutes, replay: true });
+    socket.emit('task-request', { taskId: r.id, title: r.title, client: r.client_org || r.client_name, clientName: r.client_org || r.client_name, duration: r.duration_minutes, durationMinutes: r.duration_minutes, replay: true });
   }
 }
 
@@ -812,14 +812,18 @@ app.get('/api/tasks', authenticateToken, async (req, res) => {
   if (req.user.role === 'client') {
     tasks = await db.all(`
       SELECT t.*,
-             (SELECT COUNT(*) FROM intrusion_events e WHERE e.task_id = t.id) AS intrusion_count
+             (SELECT COUNT(*) FROM intrusion_events e WHERE e.task_id = t.id) AS intrusion_count,
+             (SELECT r.vendor_id FROM remote_sessions r WHERE r.task_id = t.id ORDER BY r.id DESC LIMIT 1) AS session_vendor_id,
+             (SELECT COALESCE(NULLIF(vu.organization, ''), 'Independent Vendor') || ' (' || vu.username || ')'
+                FROM remote_sessions r JOIN users vu ON vu.id = r.vendor_id
+               WHERE r.task_id = t.id ORDER BY r.id DESC LIMIT 1) AS session_vendor_name
       FROM tasks t WHERE t.client_id = ? ORDER BY t.id DESC
     `, [req.user.userId]);
   } else {
     // Requests sent to this vendor account + tasks they have worked on. The token is never included.
     tasks = await db.all(`
       SELECT t.id, t.title, t.description, t.target_process, t.duration_minutes, t.status,
-             t.window_start, t.window_end, t.assigned_vendor_user_id, u.organization AS client_org,
+             t.window_start, t.window_end, t.assigned_vendor_user_id, t.client_id, u.organization AS client_org, u.username AS client_username,
              (SELECT r.id FROM remote_sessions r WHERE r.task_id = t.id AND r.vendor_id = ? ORDER BY r.id DESC LIMIT 1) AS session_id,
              (SELECT r.status FROM remote_sessions r WHERE r.task_id = t.id AND r.vendor_id = ? ORDER BY r.id DESC LIMIT 1) AS session_status
       FROM tasks t
@@ -915,13 +919,17 @@ app.post('/api/tasks', authenticateToken, requireRole('client'), async (req, res
   await logAudit(req.user.userId, 'TASK_CREATED', { taskId: task.id, duration, assignedTo: assignedVendor ? assignedVendor.id : null, customFolders: scopeLists.paths.length, customApps: scopeLists.apps.length });
   if (assignedVendor) {
     emitToUser(assignedVendor.id, 'task-request', {
-      taskId: task.id, title: task.title, client: req.user.organization || req.user.username, duration
+      taskId: task.id, title: task.title, client: req.user.organization || req.user.username, clientName: req.user.organization || req.user.username,
+      duration, durationMinutes: duration
     });
   }
   res.status(201).json({ success: true, task });
 });
 
 // ================= REMOTE SESSIONS =================
+// Display names used in tickets and in the live events. Same format as the label written when a ticket is addressed to a vendor.
+const vendorDisplayName = (u) => `${(u && u.organization) || 'Independent Vendor'} (${(u && u.username) || 'vendor'})`;
+const clientDisplayName = (u) => (u && (u.organization || u.username)) || 'Client';
 app.post('/api/sessions/connect', authenticateToken, requireRole('vendor'), async (req, res) => {
   const body = req.body || {};
   let task;
@@ -974,8 +982,27 @@ app.post('/api/sessions/connect', authenticateToken, requireRole('vendor'), asyn
   }
 
   const isReconnect = !!session;
+  // Who is who, read from the database (never from anything the browser sent)
+  const vendorRow = await db.get('SELECT id, username, organization FROM users WHERE id = ?', [req.user.userId]);
+  const clientRow = await db.get('SELECT id, username, organization FROM users WHERE id = ?', [task.client_id]);
+  const vendorName = vendorDisplayName(vendorRow || { username: req.user.username });
+  const clientName = clientDisplayName(clientRow);
+  const windowStart = parseDbDate(task.window_start);
+  // One payload for both sides. startTime/endTime are the approved window (the countdown runs to endTime).
+  const meta = {
+    taskId: task.id, title: task.title, targetProcess: task.target_process,
+    vendorId: req.user.userId, vendorName, vendorUsername: req.user.username,
+    clientId: task.client_id, clientName,
+    startTime: windowStart.getTime(), endTime: windowEnd.getTime(), windowEnd: windowEnd.getTime(),
+    durationMinutes: task.duration_minutes, acceptedAt: now.getTime(), serverTime: Date.now()
+  };
+
   if (!session) {
-    await db.run("UPDATE tasks SET status = 'active' WHERE id = ?", [task.id]);
+    // The ticket now names the vendor who really accepted it (it used to keep the label written at creation, e.g. "Any vendor with the token")
+    await db.run(
+      "UPDATE tasks SET status = 'active', vendor_id = ?, vendor_name = ?, assigned_vendor_user_id = COALESCE(assigned_vendor_user_id, ?) WHERE id = ?",
+      [req.user.userId, vendorName, req.user.userId, task.id]
+    );
     const sessionRes = await db.run(`
       INSERT INTO remote_sessions (task_id, client_id, vendor_id, vendor_name, token, status, started_at)
       VALUES (?, ?, ?, ?, ?, 'active', ?)
@@ -983,10 +1010,11 @@ app.post('/api/sessions/connect', authenticateToken, requireRole('vendor'), asyn
     session = await db.get('SELECT * FROM remote_sessions WHERE id = ?', [sessionRes.lastInsertRowid]);
     await logAudit(req.user.userId, 'SESSION_STARTED', { taskId: task.id });
     timers.schedule(task.id, windowEnd.getTime());
-    emitToUser(task.client_id, 'session-connected', {
-      taskId: task.id, vendor: req.user.username, targetProcess: task.target_process,
-      windowEnd: windowEnd.getTime(), serverTime: Date.now()
-    });
+    // Client: who accepted + the time window. `session-connected` is kept for the share-screen prompt (it now carries the same facts).
+    emitToUser(task.client_id, 'task-started', meta);
+    emitToUser(task.client_id, 'session-connected', { ...meta, vendor: vendorName });
+    // Vendor: who sent the request + the time window (every tab/window of this vendor account)
+    emitToUser(req.user.userId, 'task-accepted', meta);
   }
 
   const { token: _hidden, ...safeTask } = task; // never echo the token back
@@ -994,7 +1022,8 @@ app.post('/api/sessions/connect', authenticateToken, requireRole('vendor'), asyn
     success: true,
     reconnect: isReconnect,
     session,
-    task: { ...safeTask, status: 'active' },
+    meta,
+    task: { ...safeTask, status: 'active', vendor_id: req.user.userId, vendor_name: vendorName },
     windowEnd: windowEnd.getTime(),
     serverTime: Date.now(),
     remainingMinutes: Math.max(1, Math.round((windowEnd - now) / 60000))
