@@ -1,0 +1,6 @@
+# Railway build recipe. `npm install` (not `npm ci`) so a lock file that is out of step with package.json can never fail the build.
+[phases.install]
+cmds = ["npm install --omit=dev --no-audit --no-fund"]
+
+[start]
+cmd = "node server.js"

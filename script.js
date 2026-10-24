@@ -1,9 +1,9 @@
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
-document.addEventListener('submit', (e) => e.preventDefault(), true);
+document.addEventListener('submit', (e) => e.preventDefault(), true); sta
 
 document.addEventListener('DOMContentLoaded', () => {
 
-    
+    // Same-origin when this page is served by ScopeDesk (any port); otherwise (Live Server / file) use localhost:3000
     let API_BASE = null;
     async function resolveApiBase() {
         if (API_BASE !== null) return;
@@ -12,7 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const d = await r.json();
             if (d && d.app === 'scopedesk') { API_BASE = ''; return; }
         } catch (_) { /* not served by ScopeDesk */ }
-        API_BASE = 'https://railway.app';
+        API_BASE = 'http://localhost:3000';
     }
 
     // ================= STATE =================

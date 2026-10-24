@@ -59,7 +59,7 @@
       text.append(el('p', 'srv-live', 'A live session is open: screen sharing and remote control are paused, and the session timer keeps running on the server.'));
     }
     const steps = el('ol', 'srv-steps');
-    ['Check that this computer is online.', 'If it is, the ScopeDesk service may be restarting. This page reconnects by itself, nothing to run or install.']
+    ['Check that this computer is online.', 'Make sure you opened the address of your ScopeDesk server (your Railway address), not a copy of the page on another site.', 'If both are fine, the service may be restarting. This page reconnects by itself, nothing to run or install.']
       .forEach((t) => steps.append(el('li', '', t)));
     text.append(steps);
 

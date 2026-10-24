@@ -24,6 +24,11 @@ Railway wipes a service's disk on every deploy. Without a Volume every account a
 The server stops with a clear message if `JWT_SECRET` is missing. Demo accounts are never created in production.
 `APP_URL` and CORS are filled in automatically from Railway's domain.
 
+## Using GitHub Pages or Vercel too? (not needed)
+Railway already serves the whole app (pages + API). If you also publish the `public` folder on GitHub Pages or Vercel, those pages only forward people to Railway. For that to work, add this variable so Railway accepts them:
+`CORS_ORIGIN` = `https://keerthi957-321.github.io,https://scope-desk.vercel.app` (comma separated, no trailing slash)
+and put the Railway address in `public/app-config.json`. The simplest setup is to share only the Railway address.
+
 ## 4. Check it
 Open `https://your-address/api/health`. You should see `{"app":"scopedesk","ok":true,"status":"online"}`.
 Then open `https://your-address` and create your first account (Sign up).
@@ -35,3 +40,8 @@ Edit `public/app-config.json`:
 ```
 Commit and push (Railway redeploys), then build the desktop installer (`cd desktop`, then `npm run dist`). The same file is used by the web page and the host agent.
 A custom domain works the same way: put it in `serverUrl`.
+
+## If the build fails
+- `npm ci ... exit code 1`: the lock file did not match `package.json`. This project now builds with `npm install` (see `nixpacks.toml`) and has no lock file, so pull the latest files.
+- `You have Node.js ... ScopeDesk needs 22.13 or newer` in the deploy log: add the variable `NIXPACKS_NODE_VERSION` = `22` and redeploy.
+- Keep ONE Railway project/service for ScopeDesk. Extra copies each build separately and only add confusion (and cost).
