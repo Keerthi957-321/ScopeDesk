@@ -96,8 +96,26 @@
     return { msg: ['Waiting for the client', 'The client has to click "Share my screen". The remote screen appears here as soon as it is live.'], badge: 'Waiting for the client' };
   }
 
+  // A permanent lockout (security violation) ends the stream on this side too: tracks stop, the picture goes, the lock screen stays.
+  // A native OS notification is raised (Electron shows it as a system toast; browsers need the permission granted).
+  let lockHandled = false;
+  function onPermanentLock(v) {
+    if (lockHandled) return;
+    lockHandled = true;
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') {
+        const n = new Notification('ScopeDesk: access locked', { body: 'An app or folder outside the approved scope was detected. Your access to this session has ended.', tag: 'scopedesk-lock', requireInteraction: true });
+        n.onclick = () => { window.focus(); n.close(); };
+      }
+    } catch (_) { /* the lock screen still shows */ }
+    setTimeout(() => { try { ScopeDeskRTC.stop('violation'); } catch (_) { /* already stopped */ } }, 0);
+  }
+  // Ask once, from a real click, so the alert above is allowed to appear
+  document.addEventListener('pointerdown', () => { try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (_) { /* optional */ } }, { once: true });
+
   function render(v) {
     view = v || view;
+    if (view.halted === 'violation' && view.locked) onPermanentLock(view);
     const d = describe(view);
     const stage = $('stage');
     const live = view.conn === 'live' || view.conn === 'lost' || (!!d.soft && !!view.everLive);

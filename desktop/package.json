@@ -2,27 +2,57 @@
   "name": "scopedesk-desktop",
   "version": "1.0.0",
   "description": "ScopeDesk desktop app: opens the live ScopeDesk server and runs the host agent during a session",
+  "author": "ScopeDesk Team",
+  "license": "MIT",
   "main": "main.js",
   "private": true,
+  "engines": { "node": ">=22.13.0" },
   "scripts": {
     "start": "electron .",
     "test": "node --test \"test/*.test.js\"",
-    "dist": "npm --prefix ../agent install && electron-builder"
+    "prepare:agent": "npm --prefix ../agent install --omit=dev --no-audit --no-fund",
+    "rebuild:agent": "electron-rebuild --module-dir ../agent --force",
+    "build": "npm run prepare:agent && electron-builder --publish never",
+    "build:win": "npm run prepare:agent && electron-builder --win portable --publish never",
+    "build:win-installer": "npm run prepare:agent && electron-builder --win nsis --publish never",
+    "build:mac": "npm run prepare:agent && electron-builder --mac dmg --publish never",
+    "build:linux": "npm run prepare:agent && electron-builder --linux AppImage --publish never",
+    "dist": "npm run build"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.7.0",
     "electron": "^37.0.0",
     "electron-builder": "^26.0.0"
   },
   "build": {
     "appId": "com.scopedesk.desktop",
     "productName": "ScopeDesk",
+    "executableName": "ScopeDesk",
+    "copyright": "ScopeDesk Team",
+    "asar": true,
+    "npmRebuild": true,
+    "directories": { "output": "dist" },
     "files": ["main.js", "preload.js", "agent-runner.js", "validate.js", "config.js", "splash.html", "package.json"],
     "extraResources": [
-      { "from": "../agent", "to": "agent", "filter": ["**/*", "!test/**", "!start-agent-*"] },
+      { "from": "../agent", "to": "agent", "filter": ["**/*", "!test/**", "!tools/**", "!start-agent-*", "!session.example.json"] },
       { "from": "../public/app-config.json", "to": "app-config.json" }
     ],
-    "win": { "target": "nsis" },
-    "mac": { "target": "dmg" },
-    "linux": { "target": "AppImage" }
+    "win": {
+      "target": [{ "target": "portable", "arch": ["x64"] }],
+      "artifactName": "ScopeDesk-${version}-portable.exe",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "portable": { "artifactName": "ScopeDesk-${version}-portable.exe" },
+    "nsis": { "oneClick": true, "perMachine": false, "artifactName": "ScopeDesk-Setup-${version}.exe", "deleteAppDataOnUninstall": false },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["universal"] }],
+      "category": "public.app-category.business",
+      "artifactName": "ScopeDesk-${version}.dmg",
+      "extendInfo": {
+        "NSScreenCaptureUsageDescription": "ScopeDesk shares your screen with the vendor you approved.",
+        "NSAppleEventsUsageDescription": "ScopeDesk reads which app is in front to enforce the approved task."
+      }
+    },
+    "linux": { "target": ["AppImage"], "category": "Utility", "artifactName": "ScopeDesk-${version}.AppImage" }
   }
 }

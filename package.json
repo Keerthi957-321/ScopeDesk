@@ -7,7 +7,12 @@
     "dev": "node --watch server.js",
     "setup-email": "node setup-email.js",
     "find-alerts": "node tools/find-alerts.js",
-    "test": "node --test \"server/test/*.test.js\""
+    "test": "node --test \"server/test/*.test.js\"",
+    "desktop": "npm --prefix desktop start",
+    "build": "npm --prefix desktop install --no-audit --no-fund && npm --prefix desktop run build",
+    "build:win": "npm --prefix desktop install --no-audit --no-fund && npm --prefix desktop run build:win",
+    "build:mac": "npm --prefix desktop install --no-audit --no-fund && npm --prefix desktop run build:mac",
+    "test:all": "npm test && npm --prefix desktop test && npm --prefix agent test"
   },
   "engines": {
     "node": ">=22.13.0"
