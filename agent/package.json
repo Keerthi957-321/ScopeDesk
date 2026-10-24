@@ -1,12 +1,12 @@
 {
   "name": "scopedesk-agent",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Runs on the CLIENT's PC during a support session. Watches the foreground app, applies the vendor's mouse/keyboard input, and reports scope violations to ScopeDesk.",
   "main": "client-agent.js",
   "scripts": {
     "start": "node client-agent.js",
     "probe": "node tools/probe-test.js",
-    "test": "node --test test/policy.test.js"
+    "test": "node --test \"test/*.test.js\""
   },
   "engines": {
     "node": ">=18"
@@ -14,7 +14,6 @@
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.0",
     "active-win": "^8.2.1",
-    "socket.io-client": "^4.8.1",
-    "ws": "^8.18.0"
+    "socket.io-client": "^4.8.1"
   }
 }

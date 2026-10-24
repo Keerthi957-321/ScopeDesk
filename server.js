@@ -24,24 +24,30 @@ const createSessionTimers = require('./server/session-timers');
 const createRemoteControl = require('./server/remote-control');
 const policyCatalog = require('./server/policy-catalog');
 const { buildRtcConfig } = require('./server/rtc-config');
+const { loadJwtSecret, buildOriginChecker } = require('./server/net-config');
 
 const app = express();
 const server = http.createServer(app);
-// The app is served by this same server, so the browser and the desktop app normally make same-origin requests.
-// Extra origins: CORS_ORIGIN (comma list), APP_URL, and Railway's public domain. localhost origins are allowed only outside production.
-const PUBLIC_ORIGINS = [process.env.CORS_ORIGIN, process.env.APP_URL, process.env.RAILWAY_PUBLIC_DOMAIN && `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`]
-  .filter(Boolean).flatMap((v) => v.split(',')).map((v) => v.trim().replace(/\/+$/, '')).filter(Boolean);
+// Railway sets RAILWAY_PROJECT_ID on every deployment, so a Railway deploy is always treated as production
+const IS_PRODUCTION = process.env.NODE_ENV === 'production' || !!process.env.RAILWAY_PROJECT_ID;
+
+// CORS: the front-end may live on Vercel, GitHub Pages or Railway itself while the API/Socket.IO lives on Railway.
+// See server/net-config.js for the exact rules (and CORS_ORIGIN for adding your own domain).
+const isAllowedOrigin = buildOriginChecker({ env: process.env, isProduction: IS_PRODUCTION });
 function corsOrigin(origin, cb) {
-  const dev = !IS_PRODUCTION && (origin === 'null' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin || ''));
-  cb(null, !origin || dev || PUBLIC_ORIGINS.includes(origin));
+  if (!isAllowedOrigin(origin) && origin) console.warn(`[CORS] Blocked origin ${origin}. Add it to CORS_ORIGIN in Railway > Variables if it is yours.`);
+  cb(null, isAllowedOrigin(origin));
 }
-const io = new Server(server, { cors: { origin: corsOrigin } });
+const io = new Server(server, {
+  cors: { origin: corsOrigin, methods: ['GET', 'POST'], credentials: false },   // auth is a bearer token in the handshake, not a cookie
+  transports: ['websocket', 'polling'],                                          // polling first-hop works through strict proxies; upgrade follows
+  pingInterval: 20000,
+  pingTimeout: 25000                                                             // survive Railway's proxy idle timeouts and mobile networks
+});
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-// Railway sets RAILWAY_PROJECT_ID on every deployment, so a Railway deploy is always treated as production
-const BUILD = '2026-10-24-a'; // shown on the page so you can tell which version you are looking at
-const IS_PRODUCTION = process.env.NODE_ENV === 'production' || !!process.env.RAILWAY_PROJECT_ID;
+const BUILD = '2026-10-24-b'; // shown on the page so you can tell which version you are looking at
 const APP_URL = (process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`)).replace(/\/+$/, '');
 if (IS_PRODUCTION) app.set('trust proxy', 1); // behind Railway's proxy: real client IPs for rate limits
 
@@ -97,22 +103,13 @@ const SHORT_PASSWORD_MSG = 'Password must be at least 8 characters long.';
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const USERNAME_RE = /^[A-Za-z0-9._-]{3,50}$/;
 
-// JWT secret: from env, else a random secret generated once and saved to .jwt_secret
-function loadJwtSecret() {
-  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
-  // A secret saved to a file is lost on every redeploy (the disk is wiped), which would sign everybody out
-  if (IS_PRODUCTION) throw new Error('JWT_SECRET is not set. In Railway: Service > Variables > add JWT_SECRET (a long random string). See RAILWAY.md.');
-  const file = path.join(__dirname, '.jwt_secret');
-  try {
-    return fs.readFileSync(file, 'utf8').trim();
-  } catch (_) {
-    const secret = crypto.randomBytes(48).toString('hex');
-    fs.writeFileSync(file, secret, { mode: 0o600 });
-    console.log('[AUTH] Generated a new JWT secret in .jwt_secret (keep it private).');
-    return secret;
-  }
-}
-const JWT_SECRET = loadJwtSecret();
+// JWT secret: from env, else a random one saved next to the database. The server never refuses to start over this
+// (a missing variable used to crash the Railway container on boot). See server/net-config.js.
+const JWT_SECRET = loadJwtSecret({
+  env: process.env,
+  dataDir: path.dirname(process.env.DB_PATH || path.join(__dirname, 'scopedesk.db')),
+  log: console
+}).secret;
 
 // ================= MIDDLEWARE =================
 app.use(cors({ origin: corsOrigin, exposedHeaders: ['X-New-Token'] }));
@@ -414,6 +411,21 @@ async function deliverPendingAlerts(user, socket) {
   }
 }
 
+// A support request sent while the vendor was offline (or whose socket dropped) would otherwise be lost: replay open ones on connect
+async function deliverPendingRequests(user, socket) {
+  const rows = await db.all(`
+    SELECT t.id, t.title, t.duration_minutes, t.window_end, u.organization AS client_org, u.username AS client_name
+    FROM tasks t LEFT JOIN users u ON u.id = t.client_id
+    WHERE t.assigned_vendor_user_id = ? AND t.status = 'pending'
+    ORDER BY t.id ASC
+  `, [user.userId]);
+  const now = Date.now();
+  for (const r of rows) {
+    if (parseDbDate(r.window_end).getTime() <= now) continue;
+    socket.emit('task-request', { taskId: r.id, title: r.title, client: r.client_org || r.client_name, duration: r.duration_minutes, replay: true });
+  }
+}
+
 io.on('connection', (socket) => {
   const user = socket.data.user;
   addSocket(user.userId, socket.id);
@@ -506,6 +518,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => removeSocket(user.userId, socket.id));
 
   if (user.role === 'client') deliverPendingAlerts(user, socket).catch((e) => console.error('[WS] pending alerts:', e.message));
+  if (user.role === 'vendor') deliverPendingRequests(user, socket).catch((e) => console.error('[WS] pending requests:', e.message));
 });
 
 // ================= AUTHENTICATION ROUTES =================

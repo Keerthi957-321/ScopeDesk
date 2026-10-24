@@ -4,6 +4,8 @@
 // Mouse x/y arrive normalised (0..1) relative to the shared screen, so the vendor's window size does not matter.
 // Assumes the Client shares their PRIMARY, ENTIRE screen (the web UI asks for that).
 
+const fs = require('fs');
+const { execFile } = require('child_process');
 const { parseInput } = require('./validate');
 let nut = null;
 let screenSize = null;
@@ -36,8 +38,9 @@ function buildKeyMap(Key) {
 }
 
 class InputInjector {
-  constructor({ monitor, log, viewOnly }) {
+  constructor({ monitor, log, viewOnly, policy, launcher = launchFileManager }) {
     this.monitor = monitor; this.log = log; this.viewOnly = viewOnly;
+    this.policy = policy; this.launcher = launcher;
     this.keyMap = null;
     this.down = new Set();     // keys currently held, so they can all be released on halt
     this.buttons = new Set();
@@ -61,7 +64,9 @@ class InputInjector {
   // Events are applied strictly in order; if the queue backs up, mouse moves are dropped first
   handle(raw) {
     const event = parseInput(raw);
-    if (!event || !this.ready || this.state === 'locked') return;
+    if (!event || this.state === 'locked') return;
+    if (event.t === 'open') { this.openFolder(event.p).catch((e) => this.log('warn', 'Open folder error: ' + e.message)); return; }
+    if (!this.ready) return;
     if (this.pending > 150 && event.t === 'move') return;
     this.pending++;
     this.queue = this.queue
@@ -94,6 +99,24 @@ class InputInjector {
     }
   }
 
+  // Vendor asked to open a folder. The check is case-insensitive (policy.js normalises "C:\\BillingData", "c:\\billingdata", ...)
+  // and compares whole path segments. Anything outside the task's allowed folders is a scope violation: the monitor locks
+  // input, the server is told, and the desktop app freezes the data channel and shows a system notification.
+  async openFolder(requested) {
+    if (this.viewOnly) return;
+    const p = String(requested || '').trim();
+    const allowed = this.policy && this.policy.allowedPaths.length > 0 && this.policy.pathAllowed(p);
+    if (!allowed) {
+      this.log('warn', `Vendor asked for a folder outside the approved paths: ${p}`);
+      this.monitor.flag({ kind: 'path', name: 'File Manager', detail: p });
+      return;
+    }
+    const stat = await fs.promises.stat(p).catch(() => null);
+    if (!stat || !stat.isDirectory()) return this.log('info', `Folder does not exist, nothing opened: ${p}`);
+    this.log('info', `Opening approved folder: ${p}`);
+    this.launcher(p);
+  }
+
   async applyKey({ k, d }) {
     // Never let the vendor press the Windows/Command key, or use Alt+Tab / Alt+F4 / Ctrl+Esc to leave the approved app
     if (/^Meta|^OS/.test(k)) return;
@@ -116,6 +139,13 @@ class InputInjector {
     } catch (_) { /* best effort */ }
     this.down.clear(); this.buttons.clear();
   }
+}
+
+// execFile with an argument array: the path is never passed through a shell, so it cannot inject commands
+function launchFileManager(folder) {
+  const [cmd, args] = process.platform === 'win32' ? ['explorer.exe', [folder]]
+    : process.platform === 'darwin' ? ['open', [folder]] : ['xdg-open', [folder]];
+  execFile(cmd, args, { windowsHide: false }, () => { /* explorer.exe exits with code 1 even on success */ });
 }
 
 module.exports = { InputInjector, buildKeyMap };

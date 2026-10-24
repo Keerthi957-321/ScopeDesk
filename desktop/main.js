@@ -1,7 +1,8 @@
 'use strict';
 // ScopeDesk desktop shell (Electron main process).
-// Double-click the app and it opens your live ScopeDesk server (Railway) in a window and starts/stops the host agent
-// on request of the page. No server runs on this computer and no terminal is shown.
+// Double-click the app: the window opens, the host agent is forked in STANDBY at the same moment (hidden, no terminal),
+// and the live ScopeDesk server (Railway) loads in the window. When the Client creates a ticket, the page sends the
+// session config with ipcRenderer.send('init-session') and the standby agent starts the session. No server runs on this computer.
 //
 // Safety rules built in:
 //   * remote control exists only while this window is open: closing the window stops the agent (nothing keeps running hidden)
@@ -9,6 +10,7 @@
 //   * only the ScopeDesk page itself can call the agent IPC channels, and it can only send {taskId, token}
 //   * the agent still enforces the task's allowed apps/folders and the time window (agent/policy.js, monitor.js)
 const { app, BrowserWindow, ipcMain, session, desktopCapturer, shell, Notification, net } = require('electron');
+app.setAppUserModelId('com.scopedesk.desktop');   // Windows needs this for native notifications to appear
 const path = require('path');
 const fs = require('fs');
 const { createAgentRunner } = require('./agent-runner');
@@ -87,14 +89,35 @@ function configureSession() {
 }
 
 // ---------- agent + IPC ----------
-function notify(title, body) { try { if (Notification.isSupported()) new Notification({ title, body }).show(); } catch (_) { /* optional */ } }
+function notify(title, body, opts = {}) {
+  try {
+    if (!Notification.isSupported()) return;
+    const n = new Notification({ title, body, ...opts });
+    n.on('click', () => { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
+    n.show();
+  } catch (_) { /* optional */ }
+}
+
+// The vendor left the approved scope (an app or a folder outside the task). The agent has already locked input on this PC.
+// Here, in this order and without waiting for the server: (1) tell the page to freeze the data channel and close the WebRTC
+// link, (2) raise a native OS notification, (3) bring the window forward so the lockout controls are visible.
+function onScopeViolation({ kind, processName, detail }) {
+  const clean = (v) => String(v || '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200);
+  const p = clean(processName), d = clean(detail);
+  if (runner) runner.freeze();
+  if (win && !win.isDestroyed()) win.webContents.send('agent:lockout', { kind, processName: p, detail: d });
+  const what = kind === 'path' ? `a folder outside the approved scope${d ? ` (${d})` : ''}` : `${p || 'an application'} that is not approved for this task`;
+  notify('ScopeDesk security alert', `The vendor tried to open ${what}. Remote control was cut and the session is locked.`, { urgency: 'critical', timeoutType: 'never' });
+  if (win && !win.isDestroyed()) { win.show(); win.focus(); }
+}
 
 function setupAgentIpc() {
   let wasActive = false;
   runner = createAgentRunner({
     agentDir: AGENT_DIR, serverUrl: SERVER_URL,
+    onViolation: onScopeViolation,
     onStatus: (s) => {
-      const active = ['connected', 'running'].includes(s.phase) || s.phase === 'starting';
+      const active = ['connected', 'running', 'starting'].includes(s.phase);
       setTitle(active);
       if (active && !wasActive) notify('ScopeDesk', 'Remote control is active for the approved task. Close ScopeDesk or press Stop to end it.');
       if (!active && wasActive) notify('ScopeDesk', 'Remote control has ended.');
@@ -103,12 +126,17 @@ function setupAgentIpc() {
     }
   });
   const trusted = (event) => isTrustedSender(event.senderFrame ? event.senderFrame.url : '', SERVER_URL);
-  ipcMain.handle('agent:initialize', (event, cfg) => {
-    if (!trusted(event)) return { ok: false, error: 'Untrusted sender.' };
+
+  // Page -> main: "a ticket was created/accepted, run this session". Fire-and-forget (ipcRenderer.send).
+  ipcMain.on('init-session', (event, cfg) => {
+    if (!trusted(event)) return;
     const v = validateAgentConfig(cfg);
-    if (!v.ok) return v;
-    return runner.start(v.value);
+    const r = v.ok ? runner.init(v.value) : v;
+    if (!r.ok && win && !win.isDestroyed()) win.webContents.send('agent:status', { phase: 'error', uiState: 'error', taskId: null, policy: '', detail: r.error });
   });
+  // Vendor input frames from the Client window's data channel. High frequency, so no reply and no logging.
+  ipcMain.on('agent:input', (event, frame) => { if (trusted(event) && typeof frame === 'string') runner.input(frame); });
+  ipcMain.on('agent:freeze', (event) => { if (trusted(event)) runner.freeze(); });
   ipcMain.handle('agent:stop', (event) => (trusted(event) ? runner.stop('stopped by the Client') : { ok: false, error: 'Untrusted sender.' }));
   ipcMain.handle('agent:status', (event) => (trusted(event) ? runner.status() : null));
 }
@@ -122,12 +150,13 @@ if (!app.requestSingleInstanceLock()) {
     configureSession();
     setupAgentIpc();
     createWindow();
+    runner.warm();   // the same instant the window opens: the hidden background agent is already running, waiting for a ticket
     if (target.error) return showError(target.error);
     if (!(await waitForServer(SERVER_URL, 60000))) return showError(`Cannot reach ScopeDesk at ${SERVER_URL}. Check your internet connection, then open the app again.`);
     if (win) await win.loadURL(SERVER_URL);
   });
   app.on('window-all-closed', () => app.quit());       // every platform: closing the window ends everything
   app.on('before-quit', () => {
-    if (runner) runner.stop('app closed');
+    if (runner) runner.shutdown();
   });
 }

@@ -178,7 +178,7 @@
                 </div>
                 <div class="live-bar-actions">
                     <button type="button" class="btn-primary" id="btnShareScreen">Share my screen</button>
-                    <button type="button" class="btn-ghost" id="btnPairAgent">Pair host agent</button>
+                    <button type="button" class="btn-ghost" id="btnPairAgent">Start remote control</button>
                     <button type="button" class="btn-ghost hidden" id="btnEnableAlerts">Enable alerts</button>
                     <button type="button" class="btn-danger btn-end-session" id="btnLiveTerminate">Terminate Connection</button>
                 </div>
@@ -323,6 +323,10 @@
                             <span class="text-green" id="emulatorStatusBadge">Connecting...</span>
                             <button id="btnOpenViewport" type="button" class="btn-ghost">Open full-screen workspace</button>
                             <button id="btnEndSession" class="btn-danger">End Session</button>
+                        </div>
+                        <div class="emulator-footer-controls" style="gap:8px">
+                            <input type="text" id="openFolderPath" maxlength="260" autocomplete="off" spellcheck="false" style="flex:1;min-width:0" placeholder="Folder to open on the client's PC, e.g. C:\BillingData\2026" aria-label="Folder to open on the client's computer">
+                            <button id="btnOpenFolder" type="button" class="btn-ghost">Open folder</button>
                         </div>
                     </div>
 
@@ -501,7 +505,7 @@
             <div class="modal-header"><h3 id="shareTitle">Your vendor is ready to connect</h3></div>
             <div class="modal-body">
                 <p><b id="shareVendor">The vendor</b> accepted your task and will see your <b>entire screen</b> and can control your mouse and keyboard until the timer ends or you terminate the session.</p>
-                <p style="margin-top:10px">Before you start: open <b id="shareProcess">the approved app</b> and make sure the host agent is running (<i>Pair host agent</i>). Choose <b>Entire screen</b> in the browser's picker, <b>click the screen preview</b> so it is highlighted, then press <b>Share</b> (the button stays grey until you pick one).</p>
+                <p style="margin-top:10px">Before you start: open <b id="shareProcess">the approved app</b> and keep the ScopeDesk desktop app open: remote control starts by itself. Choose <b>Entire screen</b> in the browser's picker, <b>click the screen preview</b> so it is highlighted, then press <b>Share</b> (the button stays grey until you pick one).</p>
                 <div id="shareError" class="auth-error hidden" role="alert" style="margin-top:12px"></div>
                 <div class="violation-actions" style="margin-top:18px">
                     <button type="button" class="btn-primary" id="btnConfirmShare">Share my screen</button>
@@ -511,36 +515,12 @@
         </div>
     </div>
 
-    <!-- ================= CLIENT: PAIR HOST AGENT ================= -->
-    <div class="modal-overlay" id="agentModal" role="dialog" aria-modal="true" aria-labelledby="agentTitle">
-        <div class="modal modal-wide">
-            <div class="modal-header">
-                <h3 id="agentTitle">Pair the host agent</h3>
-                <button class="close-modal" data-close-modal="agentModal">&times;</button>
-            </div>
-            <div class="modal-body">
-                <p>The agent watches which app is in front and applies the vendor's mouse and keyboard. Run it on <b>this</b> PC and keep this page open: it passes the vendor's input from the secure peer-to-peer channel to the agent. The token below works for this task only and stops working when the time window ends.</p>
-                <p class="cmd-label">First time only, in the <code>agent</code> folder: <code>npm install</code></p>
-                <p class="cmd-label">Windows (Command Prompt)</p>
-                <pre class="cmd-box" id="cmdWindows"></pre>
-                <p class="cmd-label">Easiest: double-click <code>agent/start-agent-windows.bat</code> (or <code>start-agent-mac-linux.command</code>) and paste this token when asked</p>
-                <pre class="cmd-box" id="cmdToken"></pre>
-                <p class="cmd-label">Mac / Linux</p>
-                <pre class="cmd-box" id="cmdUnix"></pre>
-                <div id="agentError" class="auth-error hidden" role="alert"></div>
-                <div class="violation-actions" style="margin-top:14px">
-                    <button type="button" class="btn-primary" id="btnCopyCmd">Copy command for my system</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script src="/socket.io/socket.io.js"></script>
-    <script src="status-monitor.js?v=20261024"></script>
-    <script src="remote-input.js?v=20261024"></script>
-    <script src="webrtc.js?v=20261024"></script>
-    <script src="desktop-bridge.js?v=20261024"></script>
-    <script src="script.js?v=20261024"></script>
-    <script src="build-check.js?v=20261024"></script>
+    <script src="status-monitor.js?v=20261024b"></script>
+    <script src="remote-input.js?v=20261024b"></script>
+    <script src="webrtc.js?v=20261024b"></script>
+    <script src="desktop-bridge.js?v=20261024b"></script>
+    <script src="script.js?v=20261024b"></script>
+    <script src="build-check.js?v=20261024b"></script>
 </body>
 </html>

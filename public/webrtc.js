@@ -1,25 +1,57 @@
 // ScopeDesk WebRTC remote desktop.
-//   Client: captures the screen (getDisplayMedia) and sends it.     Vendor: receives it and mirrors mouse/keyboard back.
+//   Client (host):   captures the screen (getDisplayMedia), sends it, and RECEIVES the vendor's input on RTCDataChannels.
+//   Vendor (viewer): receives the screen and sends mouse/keyboard back as small JSON frames.
+//
 // Signaling (offer/answer/ICE) goes through the authenticated Socket.IO connection the app already has.
-// Input does NOT travel peer-to-peer: it goes vendor -> server -> host agent so the server can stop it the moment the
-// timer ends or a violation is flagged (see server/remote-control.js).
+//
+// INPUT PATHS (vendor -> Client's PC)
+//   1. FAST PATH, peer to peer: vendor -> RTCDataChannel -> Client's window -> Electron IPC (ipcRenderer.send) -> background host
+//      agent -> OS input. Used whenever the desktop app's agent is running. No local network port is involved.
+//   2. FALLBACK: vendor -> Socket.IO -> server -> host agent. The server checks every event (task active, vendor owns it, rate limit).
+// Either way the agent schema-checks each frame again and refuses it unless the foreground app/folder is inside the task's scope.
+//
+// SECURITY LOCKOUT: when the agent reports an out-of-scope app or folder, the desktop app raises a native OS notification and
+// sends 'lockout' here. We immediately freeze the data channels, close the peer connection and show the locked state.
 (function () {
   let api = null, socket = null, onChange = () => {};
   let role = null, taskId = null, iceCfg = null;
   let pc = null, stream = null, pendingIce = [], retries = 0;
   let video = null, stage = null, detachInput = null;
-  // Input path state. Vendor: the two data channels the Client's offer created. Client: the local bridge to the host agent.
+  // Vendor: the two channels the Client's offer created.  Client: hostCtl is our end of 'ctl'.
   let dc = { ctl: null, mv: null }, hostBridgeReady = false, hostCtl = null;
-  const BRIDGE_URL = 'ws://127.0.0.1:47600';
-  const TOKEN_KEY = 'scopedesk_agent_token';
-  const bridge = { ws: null, ready: false, token: null, timer: null, tries: 0 };
+  let frozen = false;                        // Client: true after a lockout; no frame reaches the agent until the session is resumed
   const view = { conn: 'idle', agent: 'unknown', halted: null, shareSurface: null };
+
+  const desktop = window.scopedeskDesktop && window.scopedeskDesktop.isDesktop ? window.scopedeskDesktop : null;
+  let agentLink = false;                     // Client: is the background agent up and able to take input right now?
 
   const set = (patch) => { Object.assign(view, patch); onChange({ ...view, role, taskId }); };
 
   function init(opts) {
     api = opts.api; onChange = opts.onChange || onChange;
     console.log('[ScopeDesk] WebRTC Engine Initialized'); // developer console only, never a popup
+  }
+
+  // ---------- desktop app wiring (Client side) ----------
+  if (desktop) {
+    const track = (s) => {
+      const up = !!s && ['connected', 'running'].includes(s.phase);
+      if (up !== agentLink) { agentLink = up; announceAgentLink(); }
+    };
+    desktop.onAgentStatus(track);
+    desktop.getAgentStatus().then(track).catch(() => { /* status arrives by event anyway */ });
+    desktop.onLockout((d) => lockout(d));
+  }
+
+  // The vendor went outside the approved scope. Order matters: stop frames first, then cut the link.
+  function lockout(detail) {
+    frozen = true;
+    closeChannels();                         // 1. freeze the RTCDataChannel loop: nothing more can arrive or be forwarded
+    const was = role === 'host' ? taskId : null;
+    if (role) stop('violation');             // 2. sever the WebRTC link (also stops screen capture)
+    frozen = true;                           // stop() cleared state; keep the freeze until the session is resumed or ended
+    set({ halted: 'violation', locked: true, lockout: detail || null });
+    return was;
   }
 
   // Called by script.js every time it (re)creates the app socket
@@ -31,8 +63,8 @@
     s.on('webrtc-close', (d) => { if (taskId && d.taskId === taskId) stop(d.reason === 'security_violation' ? 'violation' : 'closed'); });
     s.on('agent-status', (d) => { if (d.taskId === taskId) set({ agent: d.online ? 'waiting' : 'offline' }); });
     s.on('agent-state', (d) => { if (d.taskId === taskId) set({ agent: d.state, policy: d.policy || view.policy }); });
-    s.on('control-halt', (d) => { if (d.taskId === taskId) set({ halted: d.reason, locked: !!d.permanent }); });
-    s.on('control-resume', (d) => { if (d.taskId === taskId) set({ halted: null, locked: false }); });
+    s.on('control-halt', (d) => { if (d.taskId === taskId) { if (d.reason === 'violation') { frozen = true; closeChannels(); } set({ halted: d.reason, locked: !!d.permanent }); } });
+    s.on('control-resume', (d) => { if (d.taskId === taskId) { frozen = false; set({ halted: null, locked: false }); } });
     // After a dropped connection the server forgot our room membership: join again
     s.on('connect', () => { if (role && taskId) join().catch(() => {}); });
   }
@@ -59,11 +91,11 @@
       else if (st === 'connecting') set({ conn: 'connecting' });
       else if (st === 'failed' || st === 'disconnected') {
         set({ conn: 'lost' });
-        if (st === 'failed' && role === 'host' && retries < 3) { retries++; const mine = pc; setTimeout(() => { if (pc === mine && role === 'host') makeOffer(); }, 1000); }
+        if (st === 'failed' && role === 'host' && !frozen && retries < 3) { retries++; const mine = pc; setTimeout(() => { if (pc === mine && role === 'host' && !frozen) makeOffer(); }, 1000); }
       }
       if (st === 'connected') retries = 0;
     };
-    // VENDOR side: the Client's offer carries two channels. 'ctl' = reliable + ordered (clicks, keys, wheel).
+    // VENDOR side: the Client's offer carries two channels. 'ctl' = reliable + ordered (clicks, keys, wheel, open-folder).
     // 'mv' = unordered, no retransmits (mouse moves: a late move is worthless, so never wait for it).
     pc.ondatachannel = (e) => {
       const ch = e.channel;
@@ -77,14 +109,14 @@
   }
 
   async function makeOffer() {
-    if (role !== 'host' || !stream) return;
+    if (role !== 'host' || !stream || frozen) return;
     const p = newPeer();
     const senders = stream.getTracks().map((t) => p.addTrack(t, stream)); // add tracks first, then create the offer
     // Data channels must exist before createOffer so they are part of the SDP. The Client only RECEIVES on them.
     hostCtl = p.createDataChannel('ctl', { ordered: true });
     const mv = p.createDataChannel('mv', { ordered: false, maxRetransmits: 0 });
     [hostCtl, mv].forEach((ch) => { ch.onmessage = (m) => forwardToAgent(m.data); });
-    hostCtl.onopen = announceBridge;
+    hostCtl.onopen = announceAgentLink;
     set({ conn: 'connecting' });
     const offer = await p.createOffer();
     await p.setLocalDescription(offer);
@@ -123,7 +155,7 @@
   // ---------- CLIENT: share the screen. Must be called from a click (browsers require a user gesture) ----------
   async function startHost(id) {
     stop();
-    role = 'host'; taskId = id; set({ conn: 'starting', halted: null });
+    role = 'host'; taskId = id; frozen = false; set({ conn: 'starting', halted: null, lockout: null });
     try {
       // getDisplayMedia must be the FIRST await after the click: Chrome/Edge only allow it while the click's
       // "transient user activation" is fresh (~5 s). Fetching the ICE config before it can make the call fail.
@@ -142,12 +174,12 @@
     } catch (err) {
       stop();
       const cancelled = err && (err.name === 'NotAllowedError' || err.name === 'AbortError');
-      throw new Error(cancelled ? 'Screen sharing was cancelled. In the browser window, click the screen preview first, then press Share.' : (err.message || 'Could not start screen sharing.'));
+      throw new Error(cancelled ? 'Screen sharing was cancelled. In the window, click the screen preview first, then press Share.' : (err.message || 'Could not start screen sharing.'));
     }
     const track = stream.getVideoTracks()[0];
     track.contentHint = 'detail';               // favour sharp text over smooth motion
     set({ shareSurface: (track.getSettings() || {}).displaySurface || null });
-    track.onended = () => stop('stopped');      // the Client pressed the browser's "Stop sharing"
+    track.onended = () => stop('stopped');      // the Client pressed "Stop sharing"
     await join();
   }
 
@@ -160,25 +192,47 @@
     await join();
   }
 
+  // Vendor -> Client. Data channel when the Client's agent link is up, otherwise the server relay.
+  function sendInput(e, volatile) {
+    if (role !== 'viewer' || view.halted) return false;
+    const ch = e.t === 'move' ? dc.mv : dc.ctl;
+    if (hostBridgeReady && ch && ch.readyState === 'open') { ch.send(JSON.stringify(e)); return true; }
+    if (socket && socket.connected) { (volatile ? socket.volatile : socket).emit('remote-input', { taskId, e }); return true; }
+    return false;
+  }
+
   // The capture logic lives in remote-input.js; this only decides how each event travels
-  function attachInput() {
-    const send = (e, volatile) => {
-      if (role !== 'viewer' || view.halted) return;
-      const ch = e.t === 'move' ? dc.mv : dc.ctl;
-      // Fast path: peer-to-peer data channel, used only when the Client's browser has a live link to the host agent
-      if (hostBridgeReady && ch && ch.readyState === 'open') return ch.send(JSON.stringify(e));
-      // Fallback: the server relay (still checked by the server on every event)
-      if (socket && socket.connected) (volatile ? socket.volatile : socket).emit('remote-input', { taskId, e });
-    };
-    detachInput = window.ScopeDeskInput.attach({ stage, video, send });
+  function attachInput() { detachInput = window.ScopeDeskInput.attach({ stage, video, send: sendInput }); }
+
+  // Vendor asks the host to open a folder in the file manager. The HOST decides: a path outside the task's allowed folders
+  // is a scope violation (input locked, Client notified, link cut). Returns false if there is no live channel.
+  function openFolder(folderPath) {
+    const p = String(folderPath || '').trim().slice(0, 260);
+    return !!p && sendInput({ t: 'open', p });
+  }
+
+  // ---------- CLIENT: hand data-channel frames to the background agent ----------
+  function announceAgentLink() {
+    if (hostCtl && hostCtl.readyState === 'open') { try { hostCtl.send(JSON.stringify({ t: 'bridge', ready: agentLink && !frozen })); } catch (_) { /* closing */ } }
+  }
+  // Raw JSON from the vendor goes to Electron untouched; the agent validates every frame itself
+  function forwardToAgent(raw) {
+    if (!desktop || frozen || view.halted || !agentLink) return;
+    if (typeof raw !== 'string' || raw.length > 600) return;
+    desktop.sendInput(raw);
   }
 
   // ---------- teardown ----------
+  function closeChannels() {
+    [hostCtl, dc.ctl, dc.mv].forEach((ch) => { if (ch) { ch.onmessage = null; try { ch.close(); } catch (_) { /* already closed */ } } });
+    hostCtl = null; dc = { ctl: null, mv: null }; hostBridgeReady = false;
+  }
+
   function closePeer() {
+    closeChannels();
     if (pc) { try { pc.close(); } catch (_) { /* already closed */ } pc = null; }
     window.scopedeskPeer = null;
     pendingIce = [];
-    dc = { ctl: null, mv: null }; hostBridgeReady = false; hostCtl = null;
   }
 
   function stop(reason) {
@@ -193,49 +247,8 @@
     return was;
   }
 
-  // ---------- CLIENT: local bridge to the host agent ----------
-  function announceBridge() {
-    if (hostCtl && hostCtl.readyState === 'open') hostCtl.send(JSON.stringify({ t: 'bridge', ready: bridge.ready }));
-  }
-  // Raw JSON from the vendor's data channel goes to the agent untouched; the agent validates every event itself
-  function forwardToAgent(raw) {
-    if (typeof raw !== 'string' || raw.length > 200 || !bridge.ready || view.halted) return;
-    bridge.ws.send(raw);
-  }
-  function setAgentToken(token) {
-    bridge.token = token;
-    try { sessionStorage.setItem(TOKEN_KEY, token); } catch (_) { /* storage blocked: bridge works until reload */ }
-    bridge.tries = 0;
-    startBridge();
-  }
-  function startBridge() {
-    if (!bridge.token) { try { bridge.token = sessionStorage.getItem(TOKEN_KEY); } catch (_) { /* ignore */ } }
-    if (!bridge.token || bridge.ws) return;
-    let ws;
-    try { ws = new WebSocket(BRIDGE_URL); } catch (_) { return retryBridge(); }
-    bridge.ws = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', token: bridge.token }));
-    ws.onmessage = (m) => {
-      let d; try { d = JSON.parse(m.data); } catch (_) { return; }
-      if (d.t === 'ready') { bridge.ready = true; bridge.tries = 0; set({ agent: d.state || 'waiting' }); announceBridge(); }
-      else if (d.t === 'state') set({ agent: d.state });
-      // The agent saw a violation: hang up immediately, without waiting for the server
-      else if (d.t === 'halt' && d.reason === 'violation' && role === 'host') stop('violation');
-    };
-    ws.onclose = () => { bridge.ws = null; if (bridge.ready) { bridge.ready = false; announceBridge(); } if (bridge.token) retryBridge(); };
-    ws.onerror = () => { /* agent not running: the UI shows "Host agent: not running" */ };
-  }
-  function retryBridge() {
-    clearTimeout(bridge.timer);
-    bridge.timer = setTimeout(startBridge, Math.min(15000, 2000 * (++bridge.tries))); // back off so a missing agent is not hammered
-  }
-  function stopBridge() {
-    clearTimeout(bridge.timer);
-    bridge.token = null; bridge.tries = 0;
-    try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) { /* ignore */ }
-    if (bridge.ws) { const w = bridge.ws; bridge.ws = null; w.close(); }
-    bridge.ready = false;
-  }
-
-  window.ScopeDeskRTC = { init, bindSocket, startHost, startViewer, stop, setAgentToken, startBridge, stopBridge, isActive: () => !!role, current: () => ({ role, taskId }) };
+  // Kept so older pages that still call them do not break. The local WebSocket bridge (ws://127.0.0.1:47600) is gone:
+  // the desktop app passes input over Electron IPC, so no port is opened on the Client's PC.
+  const noop = () => {};
+  window.ScopeDeskRTC = { init, bindSocket, startHost, startViewer, stop, openFolder, setAgentToken: noop, startBridge: noop, stopBridge: noop, isActive: () => !!role, current: () => ({ role, taskId }) };
 })();

@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-10-24-a';
+window.SCOPEDESK_BUILD = '2026-10-24-b';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -561,7 +561,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 toast(`Session closed: ${d.message || 'terminated.'}`, true);
                 loadTasks();
             });
-            socket.on('task-request', (d) => { toast(`New support request from ${d.client}: ${d.title}`); loadTasks(); });
+            socket.on('task-request', (d) => { if (!d.replay) toast(`New support request from ${d.client}: ${d.title}`); loadTasks(); });
+            socket.on('connect', () => loadTasks());   // after any (re)connection: catch up on requests sent while offline
+            clearInterval(STATE.vendorPoll);
+            STATE.vendorPoll = setInterval(() => { if (STATE.user && STATE.user.role === 'vendor' && !document.hidden) loadTasks(); }, 15000);   // safety net behind the socket event
+            if (!STATE.visBound) { STATE.visBound = true; document.addEventListener('visibilitychange', () => { if (!document.hidden && STATE.user && STATE.user.role === 'vendor') loadTasks(); }); }
             socket.on('session-ended', () => loadTasks());
         }
     }
@@ -793,6 +797,7 @@ document.addEventListener('DOMContentLoaded', () => {
             newTaskForm.reset();
             $('newTokenValue').textContent = task.token;
             $('newTokenNotice').classList.remove('hidden');
+            startDesktopAgent(false, task.id);   // desktop app: the background agent gets this ticket's session config over IPC
             loadTasks();
         } catch (err) {
             toast(err.message, true);
@@ -1063,22 +1068,22 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!t) { if (STATE.live) clearLive(); return; }
         STATE.live = { taskId: t.id, title: t.title, vendor: t.vendor_name, process: t.target_process, endMs: Date.parse(t.window_end) };
         syncAlertsButton();
-        ScopeDeskRTC.startBridge(); // after a page reload, reconnect to the agent with the stored pairing token
         renderLiveBar();
         startDesktopAgent(false);   // desktop app: start the host agent by itself, nothing to copy or run
     }
 
     // ---- Desktop app: the host agent is started through the shell, never by hand ----
     let desktopAgentOptOut = null;   // task the Client chose to stop remote control for; not restarted automatically
-    function startDesktopAgent(manual) {
-        if (!ScopeDeskDesktop.available || !STATE.live) return Promise.resolve();
-        const taskId = STATE.live.taskId;
+    function startDesktopAgent(manual, forTaskId) {
+        const taskId = forTaskId || (STATE.live && STATE.live.taskId);
+        if (!ScopeDeskDesktop.available || !taskId) return Promise.resolve();
         if (!manual && desktopAgentOptOut === taskId) return Promise.resolve();
         if (manual) desktopAgentOptOut = null;
+        // The session config goes to the background agent through Electron IPC (ipcRenderer.send('init-session')). No dialog, no command.
         return ScopeDeskDesktop.ensureAgent({
             taskId,
             getToken: async (id) => (await api(`/api/tasks/${id}/agent-token`, { method: 'POST' })).agentToken,   // stays in memory, never shown
-            setToken: (token) => ScopeDeskRTC.setAgentToken(token)   // lets this page hand the vendor's input to the agent
+            setToken: () => {}
         }).then((r) => { if (r && r.ok === false && r.error !== 'not-desktop') toast(r.error || 'Could not start the host agent.', true); })
           .catch((err) => toast(err.message, true));
     }
@@ -1105,6 +1110,7 @@ document.addEventListener('DOMContentLoaded', () => {
         $('liveAgent').textContent = (AGENT_TEXT[agentState] || agentState).replace('the approved app', live.process || 'the approved app')
             + (policyName && !['unknown', 'offline', 'starting', 'error'].includes(agentState) ? ` (policy: ${policyName}${policyName === '(app only)' ? ', no folder policy found' : ''})` : '')
             + (agentState === 'error' && da && da.detail ? `: ${da.detail}` : '');
+        $('btnPairAgent').classList.toggle('hidden', !ScopeDeskDesktop.available);   // browsers cannot control the PC: desktop app only
         if (ScopeDeskDesktop.available) {
             const agentOn = da && ['starting', 'connected', 'running'].includes(da.phase);
             $('btnPairAgent').textContent = agentOn ? 'Stop remote control' : 'Start remote control';
@@ -1189,39 +1195,27 @@ document.addEventListener('DOMContentLoaded', () => {
     $('btnShareScreen').addEventListener('click', () => { $('shareError').classList.add('hidden'); $('shareProcess').textContent = STATE.live.process; $('shareVendor').textContent = STATE.live.vendor; $('shareModal').classList.add('open'); });
     $('btnLiveTerminate').addEventListener('click', () => { if (STATE.live && confirm('End the session now? The vendor is disconnected immediately.')) terminateTask(STATE.live.taskId); });
 
-    let agentCmd = { win: '', unix: '' };
     $('btnEnableAlerts').addEventListener('click', async () => {
         try { await Notification.requestPermission(); } catch (_) { /* unsupported */ }
         syncAlertsButton();
     });
+    // One button in the desktop app starts or stops remote control. There is no pairing dialog and nothing to copy.
     $('btnPairAgent').addEventListener('click', async () => {
-        if (!STATE.live) return;
-        if (ScopeDeskDesktop.available) {   // desktop app: one button starts or stops remote control, no pairing dialog
-            const da = STATE.desktopAgent;
-            if (da && ['starting', 'connected', 'running'].includes(da.phase)) { desktopAgentOptOut = STATE.live.taskId; ScopeDeskDesktop.stopAgent(); }
-            else await startDesktopAgent(true);
-            return;
-        }
-        $('agentError').classList.add('hidden');
-        try {
-            const { agentToken } = await api(`/api/tasks/${STATE.live.taskId}/agent-token`, { method: 'POST' });
-            ScopeDeskRTC.setAgentToken(agentToken); // the page will also hand the vendor's data-channel input to the agent
-            $('cmdToken').textContent = agentToken;
-            const origin = window.location.origin;
-            agentCmd.win = `set SERVER_URL=${origin}&& set SCOPEDESK_AGENT_TOKEN=${agentToken}&& npm start`;
-            agentCmd.unix = `SERVER_URL=${origin} SCOPEDESK_AGENT_TOKEN=${agentToken} npm start`;
-            $('cmdWindows').textContent = agentCmd.win;
-            $('cmdUnix').textContent = agentCmd.unix;
-            $('agentModal').classList.add('open');
-        } catch (err) {
-            toast(err.message, true);
-        }
+        if (!STATE.live || !ScopeDeskDesktop.available) return;
+        const da = STATE.desktopAgent;
+        if (da && ['starting', 'connected', 'running'].includes(da.phase)) { desktopAgentOptOut = STATE.live.taskId; ScopeDeskDesktop.stopAgent(); }
+        else await startDesktopAgent(true);
     });
-    $('btnCopyCmd').addEventListener('click', async () => {
-        const text = /Windows/i.test(navigator.userAgent) ? agentCmd.win : agentCmd.unix;
-        try { await navigator.clipboard.writeText(text); toast('Command copied. Paste it in a terminal inside the agent folder.'); }
-        catch (_) { toast('Could not copy automatically. Select the command above and copy it.', true); }
+
+    // Vendor: ask the client's PC to open a folder. The client's agent checks it against the approved folders (case-insensitive).
+    $('btnOpenFolder').addEventListener('click', () => {
+        const input = $('openFolderPath');
+        const folder = input.value.trim();
+        if (!folder) return toast('Type the folder you want to open.', true);
+        if (ScopeDeskRTC.openFolder(folder)) toast('Request sent. The client\'s computer checks it against the approved scope.');
+        else toast('Not connected to the client\'s screen yet.', true);
     });
+    $('openFolderPath').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('btnOpenFolder').click(); } });
 
     // ================= 8. STARTUP =================
     ScopeDeskStatus.configure({

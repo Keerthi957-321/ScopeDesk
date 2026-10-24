@@ -22,6 +22,10 @@ function parseInput(e) {
       if (typeof e.k !== 'string' || !/^[A-Za-z0-9]{1,20}$/.test(e.k) || typeof e.d !== 'boolean') return null;
       return { t: 'key', k: e.k, d: e.d };
     }
+    case 'open': {   // "open this folder in the file manager". The policy check happens in the injector, not here.
+      if (typeof e.p !== 'string' || e.p.length === 0 || e.p.length > 260 || /[\u0000-\u001f]/.test(e.p)) return null;
+      return { t: 'open', p: e.p };
+    }
     default: return null;
   }
 }

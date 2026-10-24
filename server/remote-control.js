@@ -34,6 +34,10 @@ function parseInput(e) {
       if (typeof e.k !== 'string' || !/^[A-Za-z0-9]{1,20}$/.test(e.k) || typeof e.d !== 'boolean') return null;
       return { t: 'key', k: e.k, d: e.d };
     }
+    case 'open': {   // vendor asks the host to open a folder in the file manager; the HOST AGENT checks it against the task's allowed paths
+      if (typeof e.p !== 'string' || e.p.length === 0 || e.p.length > 260 || /[\u0000-\u001f]/.test(e.p)) return null;
+      return { t: 'open', p: e.p };
+    }
     default: return null;
   }
 }

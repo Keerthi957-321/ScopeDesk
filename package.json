@@ -1,12 +1,13 @@
 {
   "name": "scopedesk",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "ScopeDesk: Secure Task-Bounded Remote Support Desktop Application",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
     "setup-email": "node setup-email.js",
-    "find-alerts": "node tools/find-alerts.js"
+    "find-alerts": "node tools/find-alerts.js",
+    "test": "node --test \"server/test/*.test.js\""
   },
   "engines": {
     "node": ">=22.13.0"
