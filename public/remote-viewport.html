@@ -2,15 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>ScopeDesk - Remote workspace</title>
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: "Segoe UI", system-ui, sans-serif; color: #e6f0f5; }
   /* The stage is the whole window. The video fills it (object-fit: contain keeps the Client's aspect ratio; remote-input.js
      maps clicks with the same letterbox maths, so the pointer lands exactly where the Vendor points). */
-  #stage { position: fixed; inset: 0; outline: none; background: #000; }
-  #video { width: 100vw; height: 100vh; object-fit: contain; background: #000; visibility: hidden; }
+  #stage { position: fixed; inset: 0; outline: none; background: #000; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  #video { width: 100vw; height: 100vh; height: 100dvh; object-fit: contain; background: #000; visibility: hidden; }
   #stage.live #video { visibility: visible; }
   #stage.control-on { box-shadow: inset 0 0 0 3px #1fbf8f; }
   #overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; background: rgba(0,0,0,.72); z-index: 5; padding: 24px; }
@@ -49,8 +49,8 @@
   <div id="hint">Move the pointer to the top edge for the toolbar</div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="remote-input.js?v=20261024b"></script>
-  <script src="webrtc.js?v=20261024b"></script>
-  <script src="remote-viewport.js?v=20261024b"></script>
+  <script src="remote-input.js?v=20261024e"></script>
+  <script src="webrtc.js?v=20261024e"></script>
+  <script src="remote-viewport.js?v=20261024e"></script>
 </body>
 </html>

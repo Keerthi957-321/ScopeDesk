@@ -86,7 +86,7 @@
       if (v.agent === 'armed') return { badge: 'Live. Remote control active' + via };
       if (v.agent === 'waiting') return { badge: `Live. Waiting for the client to open ${proc}` };
       if (v.agent === 'locked') return { badge: 'Live. Control locked', warn: true };
-      return { badge: "Live view only. The client's host agent is not running", warn: true };
+      return { badge: 'Live view only. The client must use the ScopeDesk desktop app to allow control', warn: true };
     }
     if (v.conn === 'lost') return { msg: ['Connecting...', 'Looking for a network path. Retrying automatically.'], badge: 'Reconnecting...', warn: true };
     if (v.conn === 'connecting' || v.conn === 'starting') return { msg: ['Connecting...', 'Setting up the secure connection.'], badge: 'Connecting...' };
@@ -107,6 +107,7 @@
     const s = $('barStatus');
     s.textContent = d.badge; s.classList.toggle('warn', !!d.warn); s.classList.toggle('ok', !d.warn);
     netPill(d.soft ? d.badge : null);
+    try { if (window.opener && !window.opener.closed) window.opener.postMessage({ t: 'scopedesk-viewport-state', badge: d.badge, warn: !!d.warn, conn: view.conn }, location.origin); } catch (_) { /* dashboard closed */ }
     if (live && !d.msg) { const vid = $('video'); vid.play().catch(() => {}); stage.focus(); }
   }
 
@@ -196,6 +197,14 @@
     }
     render(view);
   }
+
+  // The dashboard's "Open folder" box asks this window (the one with the live connection) to send the request.
+  window.addEventListener('message', (e) => {
+    if (e.origin !== location.origin || e.source !== window.opener || !e.data || e.data.t !== 'scopedesk-open-folder') return;
+    let ok = false;
+    try { ok = !!ScopeDeskRTC.openFolder(e.data.path); } catch (_) { ok = false; }
+    try { e.source.postMessage({ t: 'scopedesk-open-folder-result', ok }, location.origin); } catch (_) { /* dashboard closed */ }
+  });
 
   window.addEventListener('pagehide', () => { try { ScopeDeskRTC.stop('closed'); } catch (_) { /* nothing to stop */ } });
   boot();

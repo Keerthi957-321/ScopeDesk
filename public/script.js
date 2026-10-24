@@ -989,6 +989,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // The workspace window asks for the sign-in token only if its own copy of the session storage is missing (same origin only)
     window.addEventListener('message', (e) => {
         if (e.origin !== window.location.origin || !viewportWin || e.source !== viewportWin) return;
+        if (e.data && e.data.t === 'scopedesk-viewport-state') {      // the workspace window owns the live connection: mirror its status here
+            $('remoteWaitTitle').textContent = 'Your full-screen workspace is open';
+            $('remoteWaitText').textContent = 'Workspace status: ' + e.data.badge;
+            const b = $('emulatorStatusBadge'); if (b) b.textContent = e.data.badge;
+        }
+        if (e.data && e.data.t === 'scopedesk-open-folder-result') {
+            if (e.data.ok) toast('Request sent. The client\'s computer checks it against the approved scope.');
+            else toast('Not connected to the client\'s screen yet.', true);
+        }
         if (e.data && e.data.t === 'scopedesk-need-token' && STATE.authToken) e.source.postMessage({ t: 'scopedesk-token', token: STATE.authToken }, window.location.origin);
     });
     setInterval(() => {
@@ -1110,7 +1119,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (da && da.phase !== 'stopped' && ['unknown', 'offline'].includes(agentState)) { agentState = da.uiState; policyName = policyName || da.policy; }
         $('liveAgent').textContent = (AGENT_TEXT[agentState] || agentState).replace('the approved app', live.process || 'the approved app')
             + (policyName && !['unknown', 'offline', 'starting', 'error'].includes(agentState) ? ` (policy: ${policyName}${policyName === '(app only)' ? ', no folder policy found' : ''})` : '')
-            + (agentState === 'error' && da && da.detail ? `: ${da.detail}` : '');
+            + (agentState === 'error' && da && da.detail ? `: ${da.detail}` : '')
+            + (!ScopeDeskDesktop.available && ['unknown', 'offline'].includes(agentState) ? ' (you are in a web browser: open the ScopeDesk desktop app so the vendor can control this PC)' : '');
         $('btnPairAgent').classList.toggle('hidden', !ScopeDeskDesktop.available);   // browsers cannot control the PC: desktop app only
         if (ScopeDeskDesktop.available) {
             const agentOn = da && ['starting', 'connected', 'running'].includes(da.phase);
@@ -1134,7 +1144,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (v.agent === 'armed') b = 'Live. Remote control active';
             else if (v.agent === 'waiting') b = `Live. Waiting for the client to open ${proc}`;
             else if (v.agent === 'locked') { b = 'Live. Control locked'; warn = true; }
-            else { b = 'Live view only. The client\'s host agent is not running'; warn = true; }
+            else { b = 'Live view only. The client must use the ScopeDesk desktop app to allow control'; warn = true; }
         }
         else if (v.conn === 'lost') { msg = ['Connection lost', 'Trying to reconnect. The timer keeps running.']; b = 'Reconnecting...'; warn = true; }
         else if (v.conn === 'connecting' || v.conn === 'starting') { msg = ['Connecting...', 'The client shared their screen. Setting up the secure connection.']; b = 'Connecting...'; }
@@ -1213,6 +1223,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const input = $('openFolderPath');
         const folder = input.value.trim();
         if (!folder) return toast('Type the folder you want to open.', true);
+        if (viewportWin && !viewportWin.closed) { viewportWin.postMessage({ t: 'scopedesk-open-folder', path: folder }, window.location.origin); return; }   // the workspace window has the live link
         if (ScopeDeskRTC.openFolder(folder)) toast('Request sent. The client\'s computer checks it against the approved scope.');
         else toast('Not connected to the client\'s screen yet.', true);
     });

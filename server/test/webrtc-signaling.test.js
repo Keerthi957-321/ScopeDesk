@@ -111,3 +111,11 @@ test('viewer: a restart offer on the live peer is answered on the same peer; a n
 test('the server relays the "restart" signal', () => {
   assert.match(fs.readFileSync(path.join(__dirname, '..', '..', 'server.js'), 'utf8'), /\['offer', 'answer', 'candidate', 'restart'\]\.includes\(msg\.type\)/);
 });
+
+test('a device without getDisplayMedia (phone) gets a plain explanation, not a JavaScript error', async () => {
+  const h = harness();
+  const ctx = vm.createContext({ window: { addEventListener() {} }, navigator: { mediaDevices: {} }, console: { log() {} }, RTCPeerConnection: function () {}, setTimeout, clearTimeout, Promise, JSON, Date, Math });
+  vm.runInContext(SRC, ctx);
+  ctx.window.ScopeDeskRTC.init({ api: async () => CFG, onChange: () => {} });
+  await assert.rejects(() => ctx.window.ScopeDeskRTC.startHost(1), /phone and tablet browsers do not allow it/);
+});

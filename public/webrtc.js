@@ -301,6 +301,10 @@
   async function startHost(id) {
     stop();
     role = 'host'; taskId = id; frozen = false; set({ conn: 'starting', halted: null, lockout: null });
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+      stop();
+      throw new Error('This device cannot share its screen: phone and tablet browsers do not allow it. Open ScopeDesk on a Windows, Mac or Linux computer (Chrome, Edge or the ScopeDesk desktop app) and press Share my screen there. A phone can still be used as the Vendor to view and control a computer.');
+    }
     try {
       // getDisplayMedia must be the FIRST await after the click: Chrome/Edge only allow it while the click's
       // "transient user activation" is fresh (~5 s). Fetching the ICE config before it can make the call fail.

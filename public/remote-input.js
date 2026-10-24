@@ -4,6 +4,8 @@
 //   {"t":"down"|"up","x":0.42,"y":0.11,"b":0|1|2}            button press/release (0 left, 1 middle, 2 right)
 //   {"t":"wheel","dx":0,"dy":120}                            scroll, in pixels
 //   {"t":"key","k":"KeyA","d":true|false}                    KeyboardEvent.code + pressed/released
+// TOUCH (phone/tablet vendor): tap = left click, double tap = double click, long press = right click,
+// one-finger drag = click-and-drag, two-finger drag = scroll.
 // A double-click needs no special event: two quick down/up pairs at the same spot are a double-click to the Client's OS.
 //
 // ScopeDeskInput.attach({ stage, video, send }) -> detach()    `send(event, volatile)` decides how the event travels.
@@ -39,14 +41,57 @@
       heldKeys.clear(); heldButtons.clear();
     };
 
+    // ----- touch gestures -----
+    const tp = new Map();                       // pointerId -> { cx, cy }
+    const T = { mode: 'none', start: null, timer: null, lastCX: 0, lastCY: 0 };
+    const avg = () => { let x = 0, y = 0; tp.forEach((p) => { x += p.cx; y += p.cy; }); return { x: x / tp.size, y: y / tp.size }; };
+    const pos = (cx, cy) => mapToVideo(video, cx, cy, true);
+    const touchDown = (ev) => {
+      stage.setPointerCapture(ev.pointerId);
+      tp.set(ev.pointerId, { cx: ev.clientX, cy: ev.clientY });
+      clearTimeout(T.timer);
+      if (tp.size >= 2) {
+        if (T.mode === 'drag') { const q = pos(ev.clientX, ev.clientY); if (q) send({ t: 'up', ...q, b: 0 }); }
+        T.mode = 'scroll'; const a = avg(); T.lastCX = a.x; T.lastCY = a.y; return;
+      }
+      T.mode = 'tap'; T.start = { cx: ev.clientX, cy: ev.clientY };
+      T.timer = setTimeout(() => {                // long press: right click
+        if (T.mode !== 'tap') return;
+        const q = pos(T.start.cx, T.start.cy); T.mode = 'long';
+        if (q) { send({ t: 'move', ...q }); send({ t: 'down', ...q, b: 2 }); send({ t: 'up', ...q, b: 2 }); }
+      }, 550);
+    };
+    const touchMove = (ev) => {
+      if (!tp.has(ev.pointerId)) return;
+      tp.set(ev.pointerId, { cx: ev.clientX, cy: ev.clientY });
+      if (T.mode === 'scroll') {
+        const a = avg(); send({ t: 'wheel', dx: -(a.x - T.lastCX), dy: -(a.y - T.lastCY) }); T.lastCX = a.x; T.lastCY = a.y; return;
+      }
+      if (T.mode === 'tap' && Math.hypot(ev.clientX - T.start.cx, ev.clientY - T.start.cy) > 10) {
+        clearTimeout(T.timer); T.mode = 'drag';
+        const q = pos(T.start.cx, T.start.cy); if (q) { send({ t: 'move', ...q }); send({ t: 'down', ...q, b: 0 }); heldButtons.set(0, q); }
+      }
+      if (T.mode === 'drag') { const q = pos(ev.clientX, ev.clientY); if (q) { lastPos = q; send({ t: 'move', ...q }, true); } }
+    };
+    const touchUp = (ev) => {
+      if (!tp.has(ev.pointerId)) return;
+      tp.delete(ev.pointerId); clearTimeout(T.timer);
+      const q = pos(ev.clientX, ev.clientY) || lastPos;
+      if (T.mode === 'tap') { send({ t: 'move', ...q }); send({ t: 'down', ...q, b: 0 }); send({ t: 'up', ...q, b: 0 }); lastPos = q; }
+      else if (T.mode === 'drag') { heldButtons.delete(0); send({ t: 'up', ...q, b: 0 }); }
+      if (tp.size === 0) T.mode = 'none';
+    };
+
     const offs = [
       on(stage, 'pointermove', (ev) => {
+        if (ev.pointerType === 'touch') return touchMove(ev);
         const now = performance.now(); if (now - lastMove < 16) return; lastMove = now; // about 60 per second
         const p = mapToVideo(video, ev.clientX, ev.clientY, false);
         if (p) { lastPos = p; send({ t: 'move', ...p }, true); }
       }),
       on(stage, 'pointerdown', (ev) => {
         stage.focus();
+        if (ev.pointerType === 'touch') { ev.preventDefault(); return touchDown(ev); }
         const p = mapToVideo(video, ev.clientX, ev.clientY, false); if (!p) return;
         ev.preventDefault();
         stage.setPointerCapture(ev.pointerId);       // keep receiving the release even if the pointer leaves the box
@@ -55,13 +100,14 @@
         send({ t: 'down', ...p, b });
       }),
       on(stage, 'pointerup', (ev) => {
+        if (ev.pointerType === 'touch') return touchUp(ev);
         const b = Math.min(ev.button, 2);
         if (!heldButtons.has(b)) return;
         const p = mapToVideo(video, ev.clientX, ev.clientY, true) || lastPos;   // clamp: a release outside the box must still arrive
         heldButtons.delete(b);
         send({ t: 'up', ...p, b });
       }),
-      on(stage, 'pointercancel', releaseAll),
+      on(stage, 'pointercancel', (ev) => { if (ev.pointerType === 'touch') { tp.delete(ev.pointerId); T.mode = 'none'; clearTimeout(T.timer); } releaseAll(); }),
       on(stage, 'contextmenu', (ev) => ev.preventDefault()),
       on(stage, 'dragstart', (ev) => ev.preventDefault()),
       // dblclick is observed only to stop the vendor's own page selecting text. The remote double-click is already made by
