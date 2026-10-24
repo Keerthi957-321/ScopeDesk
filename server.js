@@ -474,7 +474,7 @@ io.on('connection', (socket) => {
   socket.on('webrtc-signal', (msg) => {
     const taskId = Number(msg && msg.taskId);
     if (!socket.data.rtc.has(taskId)) return; // must have joined this task's room first
-    if (!['offer', 'answer', 'candidate'].includes(msg.type)) return;
+    if (!['offer', 'answer', 'candidate', 'restart'].includes(msg.type)) return;
     if (JSON.stringify(msg).length > 20000) return;
     const { type, offer, answer, candidate } = msg;
     socket.to(rtcRoom(taskId)).emit('webrtc-signal', { taskId, type, offer, answer, candidate });

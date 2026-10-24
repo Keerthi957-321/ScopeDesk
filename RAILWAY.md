@@ -47,6 +47,7 @@ A custom domain works the same way: put it in `serverUrl`.
 - Keep ONE Railway project/service for ScopeDesk. Extra copies each build separately and only add confusion (and cost).
 
 ## Relay (TURN): required when the two people are on different networks
+Out of the box the server now adds a shared public relay as a best-effort fallback (`/api/health` still shows `"relay":false` until you add your own). It is fine for testing; for production use Cloudflare or Metered below, because shared relays are rate limited and can stop working without notice. Set `PUBLIC_TURN_FALLBACK=false` to disable it.
 Symptom without it: the Vendor window stays on "Connecting..." and the Client sees "connection lost, retrying". Open `https://your-address/api/health`: if it shows `"relay":false`, this step is missing.
 1. Create a free Cloudflare account, open **Realtime > TURN Server** and create a TURN key. Copy the **Turn Token ID** and the **API Token**.
 2. In Railway > Variables add `CLOUDFLARE_TURN_KEY_ID` (the Token ID) and `CLOUDFLARE_TURN_API_TOKEN` (the API Token). Railway redeploys by itself.
