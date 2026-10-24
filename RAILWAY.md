@@ -45,3 +45,10 @@ A custom domain works the same way: put it in `serverUrl`.
 - `npm ci ... exit code 1`: the lock file did not match `package.json`. This project now builds with `npm install` (see `nixpacks.toml`) and has no lock file, so pull the latest files.
 - `You have Node.js ... ScopeDesk needs 22.13 or newer` in the deploy log: add the variable `NIXPACKS_NODE_VERSION` = `22` and redeploy.
 - Keep ONE Railway project/service for ScopeDesk. Extra copies each build separately and only add confusion (and cost).
+
+## Relay (TURN): required when the two people are on different networks
+Symptom without it: the Vendor window stays on "Connecting..." and the Client sees "connection lost, retrying". Open `https://your-address/api/health`: if it shows `"relay":false`, this step is missing.
+1. Create a free Cloudflare account, open **Realtime > TURN Server** and create a TURN key. Copy the **Turn Token ID** and the **API Token**.
+2. In Railway > Variables add `CLOUDFLARE_TURN_KEY_ID` (the Token ID) and `CLOUDFLARE_TURN_API_TOKEN` (the API Token). Railway redeploys by itself.
+3. Check `/api/health` again: it must show `"relay":true`. Credentials are created per session and expire when the task time ends.
+(Your own coturn server or another provider also works: see `.env.example`.)

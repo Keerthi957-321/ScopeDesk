@@ -23,7 +23,7 @@ const db = require('./db');
 const createSessionTimers = require('./server/session-timers');
 const createRemoteControl = require('./server/remote-control');
 const policyCatalog = require('./server/policy-catalog');
-const { buildRtcConfig } = require('./server/rtc-config');
+const { buildRtcConfig, relayConfigured } = require('./server/rtc-config');
 const { loadJwtSecret, buildOriginChecker } = require('./server/net-config');
 
 const app = express();
@@ -119,7 +119,7 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   next();
 });
-app.get('/api/health', (req, res) => res.status(200).json({ app: 'scopedesk', ok: true, status: 'online', build: BUILD }));
+app.get('/api/health', (req, res) => res.status(200).json({ app: 'scopedesk', ok: true, status: 'online', build: BUILD , relay: relayConfigured() }));
 // IMPORTANT: serve ONLY the /public folder (never the project root, which holds the database and secrets)
 // no-cache: the browser must re-check files on every load, so an old cached script.js can never run against a new server
 app.use('/api', (req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
@@ -1040,7 +1040,7 @@ app.get('/api/rtc-config', authenticateToken, async (req, res) => {
   const taskId = Number(req.query.taskId);
   if (!(await authorizeRtc(req.user, taskId))) return res.status(403).json({ error: 'No active session for this task.' });
   const task = await db.get('SELECT window_end FROM tasks WHERE id = ?', [taskId]);
-  res.json(buildRtcConfig({ userId: req.user.userId, expiresAtMs: parseDbDate(task.window_end).getTime() }));
+  res.json(await buildRtcConfig({ userId: req.user.userId, expiresAtMs: parseDbDate(task.window_end).getTime() }));
 });
 
 // The Client asks for a pairing token for the agent on their PC. It is valid for ONE task only, expires when the

@@ -666,7 +666,11 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .live-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #48bb78; margin-right: 4px; animation: livePulse 1.4s infinite; }
 @keyframes livePulse { 50% { opacity: .3; } }
 .session-clock-inline { font-family: 'Courier New', monospace; font-size: 16px; }
-.live-bar .btn-ghost { color: #fff; border-color: rgba(255,255,255,.4); }
+.live-bar .btn-ghost { background: transparent; color: #fff; border-color: rgba(255,255,255,.55); }
+.live-bar .btn-ghost:hover { background: rgba(255,255,255,.14); }
+/* The remote-control (Pair host agent) button: solid red, always readable */
+#btnPairAgent, .live-bar #btnPairAgent { background: #d92d20; color: #fff; border: 1px solid #b42318; font-weight: 700; }
+#btnPairAgent:hover, .live-bar #btnPairAgent:hover { background: #b42318; }
 
 /* ================= VENDOR REMOTE STAGE ================= */
 .emulator-header .session-clock, .session-clock { margin-left: auto; font-family: 'Courier New', monospace; font-size: 15px; font-weight: 700; color: #9ae6b4; background: rgba(255,255,255,.08); padding: 3px 10px; border-radius: 6px; }
@@ -700,7 +704,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .breach-text { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
 .breach-text strong { font-size: 16px; letter-spacing: .02em; }
 .breach-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-.breach-banner .btn-ghost { color: #fff; border-color: rgba(255,255,255,.5); }
+.breach-banner .btn-ghost { background: transparent; color: #fff; border-color: rgba(255,255,255,.6); }
+.breach-banner .btn-ghost:hover { background: rgba(255,255,255,.14); }
 .btn-terminate-big { background: #fff !important; color: #9b1c1c !important; font-weight: 800; font-size: 15px; padding: 12px 24px; border: 0; border-radius: 8px; cursor: pointer; }
 @keyframes breachPulse { 50% { box-shadow: 0 6px 30px rgba(252,129,129,.9); } }
 

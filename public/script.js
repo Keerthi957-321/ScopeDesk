@@ -1102,7 +1102,8 @@ document.addEventListener('DOMContentLoaded', () => {
         $('liveVendor').textContent = live.vendor || 'vendor';
         const v = STATE.rtcView || { conn: 'idle', agent: 'unknown' };
         const sharing = ['starting', 'waiting', 'connecting', 'live', 'lost'].includes(v.conn);
-        $('liveShare').textContent = SHARE_TEXT[v.conn] || v.conn;
+        $('liveShare').textContent = (SHARE_TEXT[v.conn] || v.conn)
+            + (v.relay === false && (v.conn === 'lost' || (v.conn === 'connecting' && v.connectSlow)) ? ' (no relay server set up: see RAILWAY.md)' : '');
         // In the desktop app the agent reports straight to this window, so the label updates the instant it changes
         const da = STATE.desktopAgent;
         let agentState = v.agent, policyName = v.policy;

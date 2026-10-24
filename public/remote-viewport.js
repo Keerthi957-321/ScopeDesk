@@ -54,6 +54,9 @@
     const proc = task ? task.target_process : 'the approved app';
     if (v.halted === 'violation' && v.locked) return { msg: ['Locked out', 'Your access ended after a security violation. It cannot be restored in this session.'], badge: 'Locked out', warn: true };
     if (v.halted === 'violation') return { msg: ['Control suspended', 'An app outside the approved scope was detected. The client has been alerted and decides what happens next.'], badge: 'Control suspended', warn: true };
+    const stuck = (v.conn === 'connecting' && v.connectSlow) || v.conn === 'lost';
+    if (stuck && v.relay === false) return { msg: ['Cannot connect across networks', 'The two computers are on different networks and the ScopeDesk server has no relay (TURN) set up yet, so the screen cannot reach you. Ask the administrator to follow the "Relay" step in RAILWAY.md.'], badge: 'No relay server', warn: true };
+    if (v.conn === 'connecting' && v.connectSlow) return { msg: ['Still connecting...', 'This is taking longer than usual. Both computers need internet access, and a strict firewall can block the link. Retrying automatically.'], badge: 'Connecting slowly...', warn: true };
     if (v.conn === 'live') {
       if (v.agent === 'armed') return { badge: 'Live. Remote control active' };
       if (v.agent === 'waiting') return { badge: `Live. Waiting for the client to open ${proc}` };

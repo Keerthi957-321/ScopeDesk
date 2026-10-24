@@ -20,7 +20,8 @@
   // Vendor: the two channels the Client's offer created.  Client: hostCtl is our end of 'ctl'.
   let dc = { ctl: null, mv: null }, hostBridgeReady = false, hostCtl = null;
   let frozen = false;                        // Client: true after a lockout; no frame reaches the agent until the session is resumed
-  const view = { conn: 'idle', agent: 'unknown', halted: null, shareSurface: null };
+  const view = { conn: 'idle', agent: 'unknown', halted: null, shareSurface: null, relay: null, connectSlow: false };
+  let slowTimer = null;                       // fires when the link has been "connecting" for 15 s (usually: no relay between two networks)
 
   const desktop = window.scopedeskDesktop && window.scopedeskDesktop.isDesktop ? window.scopedeskDesktop : null;
   let agentLink = false;                     // Client: is the background agent up and able to take input right now?
@@ -84,13 +85,23 @@
     closePeer();
     pc = new RTCPeerConnection({ iceServers: iceCfg.iceServers, iceTransportPolicy: iceCfg.iceTransportPolicy });
     pendingIce = [];
-    pc.onicecandidate = (e) => { if (e.candidate && socket) socket.emit('webrtc-signal', { taskId, type: 'candidate', candidate: e.candidate }); };
+    pc.onicecandidate = (e) => {
+      if (e.candidate) console.log('[ScopeDesk] ICE candidate:', e.candidate.type || 'unknown');   // developer console only: host / srflx / relay
+      if (e.candidate && socket) socket.emit('webrtc-signal', { taskId, type: 'candidate', candidate: e.candidate });
+    };
+    pc.oniceconnectionstatechange = () => { if (pc) console.log('[ScopeDesk] ICE state:', pc.iceConnectionState); };
     pc.onconnectionstatechange = () => {
       const st = pc && pc.connectionState;
-      if (st === 'connected') set({ conn: 'live' });
-      else if (st === 'connecting') set({ conn: 'connecting' });
+      if (st === 'connected') { clearTimeout(slowTimer); set({ conn: 'live', connectSlow: false }); }
+      else if (st === 'connecting') {
+        set({ conn: 'connecting' });
+        clearTimeout(slowTimer);
+        const mine = pc;
+        slowTimer = setTimeout(() => { if (pc === mine && mine.connectionState === 'connecting') set({ connectSlow: true }); }, 15000);
+      }
       else if (st === 'failed' || st === 'disconnected') {
-        set({ conn: 'lost' });
+        clearTimeout(slowTimer);
+        set({ conn: 'lost', connectSlow: true });
         if (st === 'failed' && role === 'host' && !frozen && retries < 3) { retries++; const mine = pc; setTimeout(() => { if (pc === mine && role === 'host' && !frozen) makeOffer(); }, 1000); }
       }
       if (st === 'connected') retries = 0;
@@ -171,6 +182,7 @@
         surfaceSwitching: 'exclude'
       });
       iceCfg = await api(`/api/rtc-config?taskId=${id}`);
+      set({ relay: !!iceCfg.relay });
     } catch (err) {
       stop();
       const cancelled = err && (err.name === 'NotAllowedError' || err.name === 'AbortError');
@@ -188,6 +200,7 @@
     stop();
     role = 'viewer'; taskId = id; video = els.video; stage = els.stage; set({ conn: 'starting', halted: null });
     iceCfg = await api(`/api/rtc-config?taskId=${id}`);
+    set({ relay: !!iceCfg.relay });
     attachInput();
     await join();
   }
@@ -243,7 +256,8 @@
     if (socket && taskId && role) socket.emit('webrtc-leave', { taskId });
     const was = taskId;
     role = null; taskId = null; video = null; stage = null;
-    set({ conn: reason || 'idle', agent: 'unknown', halted: null, shareSurface: null });
+    clearTimeout(slowTimer);
+    set({ conn: reason || 'idle', agent: 'unknown', halted: null, shareSurface: null, connectSlow: false });
     return was;
   }
 
