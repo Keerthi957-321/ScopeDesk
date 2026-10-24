@@ -28,6 +28,8 @@
   .ok { color: #3ddc97; } .warn { color: #ffb347; }
   #bar button { background: #16303f; color: #e6f0f5; border: 1px solid #33566a; border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit; }
   #bar button:hover { background: #1d3d50; }
+  #bar button:disabled { opacity: .45; cursor: not-allowed; }
+  #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; z-index: 8; transition: opacity .35s; }
   #hint { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 4; font-size: 12px; color: #9db3c0; background: rgba(0,0,0,.55); padding: 4px 10px; border-radius: 10px; pointer-events: none; opacity: 0; transition: opacity .3s; }
   #hint.show { opacity: 1; }
 </style>
@@ -43,14 +45,16 @@
     <span><b id="barTask">Task</b> <span id="barProc"></span></span>
     <span class="grow" id="barStatus">Connecting...</span>
     <span>Time left: <b class="clock" id="barClock">--:--</b></span>
+    <button type="button" id="btnShot" title="Save the current frame of the remote screen to this computer as ScopeDesk_Capture.png" disabled>Screenshot</button>
     <button type="button" id="btnFull">Full screen</button>
     <button type="button" id="btnClose" title="Closing this window does not end the session. End it from the dashboard.">Close workspace</button>
   </div>
+  <div id="flash"></div>
   <div id="hint">Move the pointer to the top edge for the toolbar</div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="remote-input.js?v=20261024e"></script>
-  <script src="webrtc.js?v=20261024e"></script>
-  <script src="remote-viewport.js?v=20261024e"></script>
+  <script src="remote-input.js?v=20261024f"></script>
+  <script src="webrtc.js?v=20261024f"></script>
+  <script src="remote-viewport.js?v=20261024f"></script>
 </body>
 </html>

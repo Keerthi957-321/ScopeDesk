@@ -106,6 +106,7 @@
     overlay(d.msg ? d.msg[0] : null, d.msg ? d.msg[1] : '');
     const s = $('barStatus');
     s.textContent = d.badge; s.classList.toggle('warn', !!d.warn); s.classList.toggle('ok', !d.warn);
+    $('btnShot').disabled = !shotAllowed(view);
     netPill(d.soft ? d.badge : null);
     try { if (window.opener && !window.opener.closed) window.opener.postMessage({ t: 'scopedesk-viewport-state', badge: d.badge, warn: !!d.warn, conn: view.conn }, location.origin); } catch (_) { /* dashboard closed */ }
     if (live && !d.msg) { const vid = $('video'); vid.play().catch(() => {}); stage.focus(); }
@@ -137,6 +138,27 @@
     if (!stay) barTimer = setTimeout(() => $('bar').classList.remove('show'), 4000);
   }
   document.addEventListener('pointermove', (e) => { if (e.clientY < 48) showBar(false); }, { passive: true });
+  // ---------- screenshot: the frame being shown right now, saved to THIS computer's Downloads as ScopeDesk_Capture.png ----------
+  // Only while the stream is live and control has not been suspended or locked (a halted session must not yield more captures).
+  function shotAllowed(v) { return !!v && v.conn === 'live' && !v.halted; }
+  function takeScreenshot() {
+    const vid = $('video');
+    if (!shotAllowed(view) || !vid.videoWidth || !vid.videoHeight) return;
+    const c = document.createElement('canvas');
+    c.width = vid.videoWidth; c.height = vid.videoHeight;      // the remote screen's real pixel size, not the window's
+    c.getContext('2d').drawImage(vid, 0, 0, c.width, c.height);
+    c.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'ScopeDesk_Capture.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      const f = $('flash'); f.style.opacity = '.55'; setTimeout(() => { f.style.opacity = '0'; }, 120);   // shutter feedback
+    }, 'image/png');
+  }
+  $('btnShot').addEventListener('click', takeScreenshot);
+
   $('btnFull').addEventListener('click', () => {
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     else document.documentElement.requestFullscreen().catch(() => {});

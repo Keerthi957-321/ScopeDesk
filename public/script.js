@@ -1175,10 +1175,32 @@ document.addEventListener('DOMContentLoaded', () => {
         $('navSessionLink').classList.toggle('hidden', !STATE.live);
     }
 
+    // CLIENT: the desktop app reported a scope violation. This appears at once, before any server round trip, and covers the page.
+    // The server alert (violation modal + banner with Terminate / Resume) follows underneath; "Review" reveals it.
+    let lockScreen = null;
+    function showLocalLockScreen(v) {
+        const on = v.halted === 'violation' && !!v.lockout;
+        if (!on) { if (lockScreen) lockScreen.style.display = 'none'; return; }
+        if (!lockScreen) {
+            lockScreen = document.createElement('div');
+            lockScreen.setAttribute('role', 'alertdialog');
+            lockScreen.style.cssText = 'position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;background:#7f1d1d;color:#fff;font-family:"Segoe UI",system-ui,sans-serif';
+            lockScreen.innerHTML = '<div style="max-width:560px"><div style="font-size:54px">&#128274;</div><h1 style="margin:8px 0 12px;font-size:30px">Security breach: access locked</h1><p id="lockWhat" style="font-size:17px;line-height:1.5;margin:0 0 20px"></p><p style="opacity:.85;margin:0 0 24px">The vendor\'s input was stopped and the screen connection was cut. Nothing on this computer can be controlled remotely.</p><button type="button" id="lockReview" style="font:inherit;font-size:16px;padding:10px 22px;border-radius:8px;border:0;cursor:pointer;background:#fff;color:#7f1d1d">Review and decide</button></div>';
+            document.body.appendChild(lockScreen);
+            lockScreen.querySelector('#lockReview').addEventListener('click', () => { lockScreen.style.display = 'none'; });
+        }
+        const d = v.lockout || {};
+        lockScreen.querySelector('#lockWhat').textContent = d.kind === 'path'
+            ? `The vendor tried to open a folder outside the approved scope${d.detail ? ': ' + d.detail : ''}.`
+            : `The vendor brought ${d.processName || 'an application'} to the front, which is not approved for this task.`;
+        lockScreen.style.display = 'flex';
+    }
+
     ScopeDeskRTC.init({
         api: (path) => api(path),
         onChange: (v) => {
             STATE.rtcView = v;
+            if (STATE.user && STATE.user.role === 'client') showLocalLockScreen(v);
             if (STATE.user && STATE.user.role === 'vendor') renderVendorState(v); else renderLiveBar();
         }
     });
