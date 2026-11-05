@@ -1,3 +1,29 @@
+# Update 13 (build 2026-11-05-v11): Razorpay payments + hard "Terminate Session Now"
+
+## Payments (Razorpay)
+| Change | Files |
+|---|---|
+| NEW billing rules module: 3 free tasks per calendar month (each up to 15 min), then paid; price table in rupees, charged in paise; Razorpay Orders API + HMAC signature check (no SDK). Payments switch OFF (every task free and unlimited) when either key is missing | `server/billing.js` |
+| `GET /api/billing/quote` (display only), `POST /api/tasks` now decides free vs paid **from the database**. The free-allowance check and the insert are one SQL statement, so two tabs cannot both take the last free task. Paid requests get a Razorpay order and no task yet | `server.js` |
+| `POST /api/payments/verify`: signature-verified, owner-only, claim-once; the task is created from the request stored with the order, never from what the browser sends after paying | `server.js` |
+| New columns `tasks.billing / billing_month / amount_paise / payment_order_id`, new table `payment_orders` (migrated automatically) | `db.js` |
+| Ticket form shows "This task is FREE - N of 3 free tasks left this month" or "Pay ₹X & Issue Token"; Razorpay's script is only loaded when the server says payment is needed | `public/script.js`, `public/index.html`, `public/style.css` |
+| Desktop app: Razorpay's netbanking / 3-D Secure popup opens inside the app (sandboxed) instead of being thrown to the external browser | `desktop/main.js` |
+| `.env.example`: `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, optional `TASK_PRICES_INR`, `BILLING_TIMEZONE` | `.env.example` |
+
+## Remote access: hard termination
+| Change | Files |
+|---|---|
+| FIX: `clearLive()` called `ScopeDeskDesktop.endTask()`, which was missing from the shipped bridge. In the desktop app this threw, so the host agent was never stopped from the Client's side and the rest of the cleanup was skipped. Bridge restored (`endTask`, ordered status events, `manual` flag); this also fixes the 3 failing bridge tests | `public/desktop-bridge.js` |
+| "Terminate Session Now" (alert dialog, breach banner, and NEW on the breach overlay): kills the host agent and WebRTC on this PC first, then terminates over the WebSocket, falling back to HTTPS if the socket is down or silent for 4 s | `public/script.js`, `public/index.html`, `public/style.css` |
+| Token revocation: `tasks.token_revoked` is set on terminate / expiry / completion. A revoked task refuses the vendor token, host-agent WebSocket handshakes (checked in `io.use`), `/api/agent/scope` and new agent tokens | `server.js`, `db.js` |
+| `terminateTask` flips the status atomically and is idempotent: pressing the button after a breach auto-terminated the task now reports success (it used to say "Could not terminate the session") and re-runs the teardown | `server.js` |
+| NEW `POST /api/tasks/:id/terminate` (owner-only HTTPS kill switch) | `server.js` |
+| `cutStream` also removes each socket's stream permission, not only its room membership | `server.js` |
+| FIX: completing a session now closes the host agent (it used to keep running until the original window ran out) | `server.js` |
+| Desktop: a task-ending stop force-kills the agent after 0.6 s (was 1.5 s) | `desktop/agent-runner.js` |
+| Tests: `test/billing.test.js`, `test/billing-off.test.js`, `test/kill-switch.test.js`, harness `test/helpers/server-harness.js` (loads the real server.js with stub packages) | `test/` |
+
 # Update 12 (build 2026-10-29-v10): window sessions with control, click-through past ScopeDesk, visible start errors
 
 | Change | Files |

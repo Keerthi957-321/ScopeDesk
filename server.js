@@ -31,6 +31,7 @@ const { validateEmailAddress } = require('./server/email-check');
 const appCatalog = require('./agent/app-catalog');
 const { buildRtcConfig, relayConfigured, describeIceSetup } = require('./server/rtc-config');
 const { loadJwtSecret, buildOriginChecker } = require('./server/net-config');
+const { createBilling } = require('./server/billing');
 
 const app = express();
 const server = http.createServer(app);
@@ -53,7 +54,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const BUILD = '2026-10-29-v10'; // shown on the page so you can tell which version you are looking at
+const BUILD = '2026-11-05-v11'; // shown on the page so you can tell which version you are looking at
 const APP_URL = (process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`)).replace(/\/+$/, '');
 if (IS_PRODUCTION) app.set('trust proxy', 1); // behind Railway's proxy: real client IPs for rate limits
 
@@ -71,6 +72,10 @@ const mailer = {
   reload() { activeMailer = buildMailer(); return activeMailer.verify(); }   // picks up settings saved from the app, no restart needed
 };
 mailer.verify().catch(() => { /* already reported by verify() */ });
+
+// ================= PAYMENTS (Razorpay) =================
+// No RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET -> payments OFF: every task is free and unlimited (legacy behaviour). See server/billing.js.
+const billing = createBilling({ env: process.env, log: console });
 
 // ================= CONSTANTS =================
 const DUPLICATE_ACCOUNT_MSG = 'An account with this email/username already exists. Please Sign In instead.';
@@ -229,8 +234,19 @@ io.use((socket, next) => {
   const payload = verifyToken(socket.handshake.auth && socket.handshake.auth.token);
   if (!payload) return next(new Error('Authentication required'));
   socket.data.user = { userId: Number(payload.userId), username: payload.username, role: payload.role };
-  if (payload.scope === 'agent') socket.data.agent = { taskId: Number(payload.taskId) }; // host agent: may only do agent things
-  next();
+  if (payload.scope !== 'agent') return next();
+  // Host agent: may only do agent things, and only while its task is open. An agent pairing JWT stays cryptographically valid until
+  // the window ends, so a terminated task must be refused HERE, or a restarted / reconnecting agent could open a fresh socket.
+  const taskId = Number(payload.taskId);
+  socket.data.agent = { taskId };
+  db.get('SELECT client_id, status, token_revoked FROM tasks WHERE id = ?', [taskId])
+    .then((task) => {
+      if (!task || task.client_id !== Number(payload.userId) || task.token_revoked || !['pending', 'active'].includes(task.status)) {
+        return next(new Error('Authentication required'));   // the agent treats this as "token revoked" and exits
+      }
+      next();
+    })
+    .catch(() => next(new Error('Authentication required')));
 });
 
 // ================= SESSION LIFECYCLE (shared by REST + sockets) =================
@@ -240,26 +256,39 @@ async function getVendorUserIds(taskId) {
 }
 
 // Ends a task. Pushes `force-terminate` to the vendor's sockets and `session-ended` to the client's sockets.
+// HARD TERMINATION. In this order, and safe to call again:
+//   1. the task row flips to its final status AND its token is revoked, in ONE conditional UPDATE (two callers cannot both "win"),
+//   2. input is halted and the host agent's WebSocket is dropped (remoteControl.teardown), the WebRTC room is emptied (cutStream),
+//   3. the vendor gets `force-terminate`, the client gets `session-ended`.
+// When the task had already ended (e.g. a breach auto-terminated it a moment before the Client pressed "Terminate Session Now"),
+// step 2 runs again anyway and the result is { ok: true, alreadyEnded: true }: the kill switch never reports a failure for a
+// session that is in fact dead.
 async function terminateTask(taskId, { reason, message, actorId, finalStatus = 'terminated', sessionStatus = 'terminated' }) {
   const task = await db.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
   if (!task) return { ok: false, error: 'Task not found.' };
-  if (!['pending', 'active'].includes(task.status)) {
-    return { ok: false, error: `This task is already ${task.status}.` };
+
+  const flip = await db.run("UPDATE tasks SET status = ?, token_revoked = 1 WHERE id = ? AND status IN ('pending', 'active')", [finalStatus, taskId]);
+  if (!flip.changes) {
+    await db.run('UPDATE tasks SET token_revoked = 1 WHERE id = ?', [taskId]);
+    timers.cancel(taskId);
+    remoteControl.teardown(taskId, reason);
+    cutStream(taskId, reason, message);
+    return { ok: true, alreadyEnded: true, status: task.status, task };
   }
 
   const now = new Date().toISOString();
   await db.run("UPDATE remote_sessions SET status = ?, ended_at = ?, end_reason = ? WHERE task_id = ? AND status = 'active'",
     [sessionStatus, now, reason, taskId]);
-  await db.run('UPDATE tasks SET status = ? WHERE id = ?', [finalStatus, taskId]);
-  await logAudit(actorId, 'SESSION_' + finalStatus.toUpperCase(), { taskId, reason });
-
-  const payload = { taskId, title: task.title, reason, message, status: finalStatus };
-  for (const vendorId of await getVendorUserIds(taskId)) emitToUser(vendorId, 'force-terminate', payload);
-  emitToUser(task.client_id, 'session-ended', payload);
+  // Teardown FIRST: nothing the vendor sends after this line reaches the Client's PC
   timers.cancel(taskId);
   remoteControl.teardown(taskId, reason);   // input stops, host agent sockets drop, per-task memory is released
   cutStream(taskId, reason, message);        // both browsers close their WebRTC connection; the stream room is emptied
-  return { ok: true, task };
+  await logAudit(actorId, 'SESSION_' + finalStatus.toUpperCase(), { taskId, reason, tokenRevoked: true });
+
+  const payload = { taskId, title: task.title, reason, message, status: finalStatus, tokenRevoked: true };
+  for (const vendorId of await getVendorUserIds(taskId)) emitToUser(vendorId, 'force-terminate', payload);
+  emitToUser(task.client_id, 'session-ended', payload);
+  return { ok: true, task: { ...task, status: finalStatus, token_revoked: 1 } };
 }
 
 async function expireOverdueTasks() {
@@ -287,6 +316,13 @@ const rtcRoom = (taskId) => `task:${taskId}`;
 function cutStream(taskId, reason, message) {
   const room = rtcRoom(taskId);
   io.to(room).emit('webrtc-close', { taskId, reason, message: message || 'The remote connection was closed.' });
+  // Revoke each member's stream permission too, not only the room membership: otherwise the socket's own
+  // "joined" mark would still let it push signals / screen frames for this task.
+  const members = (io.sockets.adapter.rooms && io.sockets.adapter.rooms.get(room)) || new Set();
+  for (const id of members) {
+    const s = io.sockets.sockets.get(id);
+    if (s && s.data && s.data.rtc) s.data.rtc.delete(taskId);
+  }
   io.in(room).socketsLeave(room);
 }
 
@@ -534,11 +570,12 @@ io.on('connection', (socket) => {
       // Ownership check: you can only terminate tasks YOU created
       if (!task || task.client_id !== user.userId) return respond(ack, { ok: false, error: 'Task not found.' });
 
-      respond(ack, await terminateTask(taskId, {
+      const result = await terminateTask(taskId, {
         reason: 'client_terminated',
         message: 'The client ended this session.',
         actorId: user.userId
-      }));
+      });
+      respond(ack, { ok: result.ok, alreadyEnded: !!result.alreadyEnded, status: result.task && result.task.status, tokenRevoked: result.ok, error: result.error });
     } catch (err) {
       console.error('[WS] terminate-session error:', err.message);
       respond(ack, { ok: false, error: 'Server error.' });
@@ -1144,33 +1181,44 @@ app.get('/api/policy-types', authenticateToken, requireRole('client'), (req, res
   res.json({ types: types || [], validated: !!types });
 });
 
-// body: { vendor_id, task, duration_minutes, allowed_apps: ["Excel", ...], alerts_enabled: true|false }
-app.post('/api/tasks', authenticateToken, requireRole('client'), async (req, res) => {
-  const parsed = taskScope.validateTaskRequest(req.body);
-  if (parsed.error) return res.status(400).json({ error: parsed.error });
-  const t = parsed.value;
+// ================= TASK CREATION + BILLING =================
+// The SERVER decides whether a task is free. The browser only shows the quote; it never sends "free: true" and nothing it sends
+// about price or allowance is read. The free-allowance check and the insert are ONE SQL statement, so two tabs pressing
+// "Issue Token" at the same moment cannot both get the 3rd free task.
 
+// How many FREE tasks this client already created in this calendar month (billing time zone). Read from the database.
+async function freeTasksUsed(clientId, month) {
+  const row = await db.get("SELECT COUNT(*) AS n FROM tasks WHERE client_id = ? AND billing = 'free' AND billing_month = ?", [clientId, month]);
+  return Number(row && row.n) || 0;
+}
+
+// Validates the request body and the chosen vendor. Returns { status, error } or { t, assignedVendor, vendorLabel, body }.
+async function prepareTask(user, rawBody) {
+  const parsed = taskScope.validateTaskRequest(rawBody);
+  if (parsed.error) return { status: 400, error: parsed.error };
+  const t = parsed.value;
   // The task goes to exactly the vendor the Client selected: an active vendor account the Client has not blocked
   const assignedVendor = await findVendorUser(t.vendorUserId);
-  if (!assignedVendor) return res.status(400).json({ error: 'The selected vendor account was not found.' });
-  if (await isVendorBlocked(req.user.userId, assignedVendor.id)) {
-    return res.status(403).json({ error: 'You terminated this vendor\'s access. Restore them in the vendor list first.' });
+  if (!assignedVendor) return { status: 400, error: 'The selected vendor account was not found.' };
+  if (await isVendorBlocked(user.userId, assignedVendor.id)) {
+    return { status: 403, error: 'You terminated this vendor\'s access. Restore them in the vendor list first.' };
   }
-  const vendorLabel = vendorDisplayName(assignedVendor);
+  // Only the validated fields are kept (stored with a paid order, re-validated when the payment comes back)
+  const body = { vendor_id: t.vendorUserId, task: t.task, duration_minutes: t.durationMinutes, allowed_apps: t.allowedApps, alerts_enabled: t.alertsEnabled };
+  return { t, assignedVendor, vendorLabel: vendorDisplayName(assignedVendor), body };
+}
 
-  const limitKey = `task-create|${req.user.userId}`;
-  if (isLimited(limitKey, 30)) return res.status(429).json({ error: 'Too many tasks created. Please try again later.' });
-  recordAttempt(limitKey, 60 * 60 * 1000);
-
+/**
+ * Inserts the task and announces it to the vendor. For billing 'free' the insert only happens while the client is still under the
+ * monthly allowance (checked inside the same statement); returns null when that race was lost.
+ */
+async function insertTask(user, prep, { billingKind, month, amountPaise = 0, paymentOrderId = null }) {
+  const { t, assignedVendor, vendorLabel } = prep;
   const token = `SCD-${crypto.randomInt(1000, 10000)}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
   const now = new Date();
   const windowEnd = new Date(now.getTime() + t.durationMinutes * 60000);
-
-  const result = await db.run(`
-    INSERT INTO tasks (client_id, vendor_id, assigned_vendor_user_id, vendor_name, title, description, target_process, task_type, allowed_paths, allowed_apps, alerts_enabled, duration_minutes, token, status, window_start, window_end)
-    VALUES (?, NULL, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, 'pending', ?, ?)
-  `, [
-    req.user.userId,
+  const values = [
+    user.userId,
     assignedVendor.id,
     vendorLabel,
     t.task,                                  // "what": the task text is the title everybody sees
@@ -1182,18 +1230,166 @@ app.post('/api/tasks', authenticateToken, requireRole('client'), async (req, res
     t.durationMinutes,
     token,
     now.toISOString(),
-    windowEnd.toISOString()
-  ]);
+    windowEnd.toISOString(),
+    billingKind, month, amountPaise, paymentOrderId
+  ];
+  const columns = `client_id, vendor_id, assigned_vendor_user_id, vendor_name, title, description, target_process, task_type, allowed_paths, allowed_apps,
+    alerts_enabled, duration_minutes, token, status, window_start, window_end, billing, billing_month, amount_paise, payment_order_id`;
+  const select = "?, NULL, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?";
+  const result = billingKind === 'free'
+    ? await db.run(`INSERT INTO tasks (${columns}) SELECT ${select}
+        WHERE (SELECT COUNT(*) FROM tasks WHERE client_id = ? AND billing = 'free' AND billing_month = ?) < ?`,
+      [...values, user.userId, month, billing.FREE_TASKS_PER_MONTH])
+    : await db.run(`INSERT INTO tasks (${columns}) VALUES (${select})`, values);
+  if (!result.changes) return null;
 
   const task = await db.get('SELECT * FROM tasks WHERE id = ?', [result.lastInsertRowid]);
   timers.schedule(task.id, windowEnd.getTime());
-  await logAudit(req.user.userId, 'TASK_CREATED', { taskId: task.id, duration: t.durationMinutes, assignedTo: assignedVendor.id, apps: t.allowedApps, folders: t.allowedPaths.length, alerts: t.alertsEnabled });
-  const clientLabel = req.user.organization || req.user.username;
+  await logAudit(user.userId, 'TASK_CREATED', { taskId: task.id, duration: t.durationMinutes, assignedTo: assignedVendor.id, apps: t.allowedApps, folders: t.allowedPaths.length, alerts: t.alertsEnabled, billing: billingKind, amountPaise });
+  const clientLabel = user.organization || user.username;
   emitToUser(assignedVendor.id, 'task-request', {
     taskId: task.id, title: task.title, client: clientLabel, clientName: clientLabel,
     duration: t.durationMinutes, durationMinutes: t.durationMinutes, allowedApps: t.allowedApps
   });
-  res.status(201).json({ success: true, task });
+  return task;
+}
+
+// What the browser may show about a decision (never the secret, never anything it could send back to change the price)
+function publicBilling(decision, month) {
+  return {
+    paymentsEnabled: decision.paymentsEnabled,
+    free: decision.free,
+    unlimited: !!decision.unlimited,
+    billing: decision.billing,
+    reason: decision.reason || null,
+    freeLimit: decision.freeLimit,
+    freeMaxMinutes: decision.freeMaxMinutes || billing.FREE_TASK_MAX_MINUTES,
+    freeLeft: decision.freeLeft,
+    freeLeftAfter: decision.freeLeftAfter != null ? decision.freeLeftAfter : decision.freeLeft,
+    priceInr: decision.priceInr,
+    amountPaise: decision.amountPaise,
+    currency: 'INR',
+    month
+  };
+}
+
+// Quote for the ticket form: "This task is FREE (2 of 3 left)" or "Pay ₹199 & Issue Token". Display only: POST /api/tasks decides again.
+app.get('/api/billing/quote', authenticateToken, requireRole('client'), async (req, res) => {
+  const duration = Number(req.query.duration_minutes);
+  if (!taskScope.DURATION_OPTIONS.includes(duration)) return res.status(400).json({ error: `Duration must be one of: ${taskScope.DURATION_OPTIONS.join(', ')} minutes.` });
+  const month = billing.month();
+  const decision = billing.decide({ durationMinutes: duration, freeUsed: billing.enabled ? await freeTasksUsed(req.user.userId, month) : 0 });
+  res.json(publicBilling(decision, month));
+});
+
+// body: { vendor_id, task, duration_minutes, allowed_apps: ["Excel", ...], alerts_enabled: true|false }
+// Free (or payments off): 201 { success, task, billing }.   Paid: 200 { success, paymentRequired: true, payment: {...}, billing } and NO task yet.
+app.post('/api/tasks', authenticateToken, requireRole('client'), async (req, res) => {
+  const prep = await prepareTask(req.user, req.body);
+  if (prep.error) return res.status(prep.status).json({ error: prep.error });
+
+  const limitKey = `task-create|${req.user.userId}`;
+  if (isLimited(limitKey, 30)) return res.status(429).json({ error: 'Too many tasks created. Please try again later.' });
+  recordAttempt(limitKey, 60 * 60 * 1000);
+
+  const month = billing.month();
+  let decision = billing.decide({ durationMinutes: prep.t.durationMinutes, freeUsed: billing.enabled ? await freeTasksUsed(req.user.userId, month) : 0 });
+
+  if (decision.billing !== 'paid') {
+    const task = await insertTask(req.user, prep, { billingKind: decision.billing, month });
+    if (task) return res.status(201).json({ success: true, task, billing: publicBilling(decision, month) });
+    // Another request used the last free task a moment ago: this one has to be paid
+    decision = billing.decide({ durationMinutes: prep.t.durationMinutes, freeUsed: billing.FREE_TASKS_PER_MONTH });
+  }
+
+  // ---- PAID: create a Razorpay order. The validated request is stored with it; the task is only created after a verified payment.
+  const insert = await db.run(
+    "INSERT INTO payment_orders (client_id, amount_paise, currency, duration_minutes, request_json, status) VALUES (?, ?, 'INR', ?, ?, 'created')",
+    [req.user.userId, decision.amountPaise, prep.t.durationMinutes, JSON.stringify(prep.body)]
+  );
+  const localId = insert.lastInsertRowid;
+  let order;
+  try {
+    order = await billing.createOrder({
+      amountPaise: decision.amountPaise,
+      receipt: `scopedesk_${localId}`,
+      notes: { scopedesk_order: String(localId), client_id: String(req.user.userId), duration_minutes: String(prep.t.durationMinutes) }
+    });
+  } catch (err) {
+    await db.run("UPDATE payment_orders SET status = 'unfulfilled', error = ? WHERE id = ?", [String(err.code || err.message).slice(0, 200), localId]);
+    console.error('[BILLING] order creation failed:', err.code || err.message);
+    return res.status(502).json({ error: 'The payment gateway is not available right now. No money was taken. Please try again in a minute.', code: 'GATEWAY_UNAVAILABLE' });
+  }
+  await db.run('UPDATE payment_orders SET razorpay_order_id = ? WHERE id = ?', [order.id, localId]);
+  const me = await db.get('SELECT username, email, organization FROM users WHERE id = ?', [req.user.userId]);
+  await logAudit(req.user.userId, 'PAYMENT_ORDER_CREATED', { orderId: order.id, amountPaise: decision.amountPaise, duration: prep.t.durationMinutes });
+
+  res.json({
+    success: true,
+    paymentRequired: true,
+    billing: publicBilling(decision, month),
+    payment: {
+      keyId: billing.keyId,                  // public key only; the secret never leaves the server
+      orderId: order.id,
+      amount: order.amount,                  // paise, exactly what Razorpay will charge
+      currency: order.currency || 'INR',
+      name: 'ScopeDesk',
+      description: `Remote support task: ${prep.t.durationMinutes} minutes`,
+      prefill: { name: (me && (me.organization || me.username)) || '', email: (me && me.email) || '' }
+    }
+  });
+});
+
+// Razorpay Checkout's success handler posts here. The signature proves Razorpay saw the payment for THIS order; only then is
+// the task created, from the request stored with the order (never from anything the browser sends now).
+app.post('/api/payments/verify', authenticateToken, requireRole('client'), async (req, res) => {
+  const b = req.body || {};
+  const orderId = String(b.razorpay_order_id || '');
+  const paymentId = String(b.razorpay_payment_id || '');
+  const signature = String(b.razorpay_signature || '');
+  if (!billing.enabled) return res.status(400).json({ error: 'Payments are not switched on for this server.' });
+
+  const limitKey = `pay-verify|${req.user.userId}`;
+  if (isLimited(limitKey, 20)) return res.status(429).json({ error: 'Too many attempts. Please wait a few minutes.' });
+
+  const order = orderId ? await db.get('SELECT * FROM payment_orders WHERE razorpay_order_id = ? AND client_id = ?', [orderId, req.user.userId]) : null;
+  if (!order) { recordAttempt(limitKey, 10 * 60 * 1000); return res.status(404).json({ error: 'Payment order not found.' }); }
+
+  // The handler can fire twice (double click, retry after a dropped connection): hand back the same task
+  if (order.status === 'fulfilled' && order.task_id) {
+    const task = await db.get('SELECT * FROM tasks WHERE id = ? AND client_id = ?', [order.task_id, req.user.userId]);
+    return res.status(200).json({ success: true, task, alreadyProcessed: true });
+  }
+  if (order.status !== 'created') {
+    return res.status(409).json({ error: order.status === 'unfulfilled' && order.razorpay_payment_id
+      ? `Your payment (${order.razorpay_payment_id}) was received but the task could not be created. Please contact support for a refund.`
+      : 'This payment is already being processed.' });
+  }
+
+  if (!billing.verifySignature({ orderId, paymentId, signature })) {
+    recordAttempt(limitKey, 10 * 60 * 1000);
+    await logAudit(req.user.userId, 'PAYMENT_SIGNATURE_INVALID', { orderId });
+    return res.status(400).json({ error: 'The payment could not be verified. If money was taken, it will be refunded automatically by Razorpay.' });
+  }
+
+  // Claim the order exactly once
+  const claim = await db.run("UPDATE payment_orders SET status = 'paid', razorpay_payment_id = ?, paid_at = ? WHERE id = ? AND status = 'created'",
+    [paymentId, new Date().toISOString(), order.id]);
+  if (!claim.changes) return res.status(409).json({ error: 'This payment is already being processed.' });
+  await logAudit(req.user.userId, 'PAYMENT_VERIFIED', { orderId, paymentId, amountPaise: order.amount_paise });
+
+  let stored = null;
+  try { stored = JSON.parse(order.request_json); } catch (_) { /* handled below */ }
+  const prep = stored ? await prepareTask(req.user, stored) : { error: 'The stored task request is unreadable.' };
+  const task = prep.error ? null : await insertTask(req.user, prep, { billingKind: 'paid', month: billing.month(), amountPaise: order.amount_paise, paymentOrderId: order.id });
+  if (!task) {
+    const why = prep.error || 'The task could not be saved.';
+    await db.run("UPDATE payment_orders SET status = 'unfulfilled', error = ? WHERE id = ?", [why.slice(0, 200), order.id]);
+    await logAudit(req.user.userId, 'PAYMENT_UNFULFILLED', { orderId, paymentId, why });
+    return res.status(409).json({ error: `Payment received (${paymentId}), but the task could not be created: ${why} Please contact support for a refund.` });
+  }
+  await db.run("UPDATE payment_orders SET status = 'fulfilled', task_id = ? WHERE id = ?", [task.id, order.id]);
+  res.status(201).json({ success: true, task, payment: { paymentId, amountPaise: order.amount_paise } });
 });
 
 // ================= REMOTE SESSIONS =================
@@ -1234,6 +1430,7 @@ app.post('/api/sessions/connect', authenticateToken, requireRole('vendor'), asyn
   if (task.status === 'completed') return res.status(400).json({ error: 'This task session has already completed.' });
   if (task.status === 'terminated') return res.status(403).json({ error: 'This session was terminated due to a boundary violation or client revocation.' });
   if (task.status === 'expired') return res.status(403).json({ error: 'This token has expired past its allocated time interval.' });
+  if (task.token_revoked) return res.status(403).json({ error: 'This token was revoked by the client.' });
 
   const windowEnd = parseDbDate(task.window_end);
   const now = new Date();
@@ -1309,7 +1506,18 @@ app.post('/api/sessions/:id/terminate', authenticateToken, requireRole('client')
     reason: 'client_terminated', message: 'The client ended this session.', actorId: req.user.userId
   });
   if (!result.ok) return res.status(400).json({ error: result.error });
-  res.json({ success: true, message: 'Session terminated and remote pipe severed.' });
+  res.json({ success: true, alreadyEnded: !!result.alreadyEnded, message: 'Session terminated and remote pipe severed.' });
+});
+
+// Kill switch over plain HTTPS, by task id. The page uses this when its WebSocket is down or does not answer in time,
+// so "Terminate Session Now" still works on a flaky connection. Owning client only.
+app.post('/api/tasks/:id/terminate', authenticateToken, requireRole('client'), async (req, res) => {
+  const taskId = Number(req.params.id);
+  const task = Number.isInteger(taskId) ? await db.get('SELECT client_id FROM tasks WHERE id = ?', [taskId]) : null;
+  if (!task || task.client_id !== req.user.userId) return res.status(404).json({ error: 'Task not found.' });
+  const result = await terminateTask(taskId, { reason: 'client_terminated', message: 'The client ended this session.', actorId: req.user.userId });
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json({ success: true, ok: true, alreadyEnded: !!result.alreadyEnded, tokenRevoked: true });
 });
 
 // Vendor (or owning client) ends the session normally
@@ -1323,8 +1531,13 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   await db.run("UPDATE remote_sessions SET status = 'completed', ended_at = ?, end_reason = 'completed' WHERE id = ?", [now, session.id]);
   // Changing the status to 'completed' fires the trust-engine trigger in db.js: rating = rating + 1 (and tasks_completed + 1)
   // for this vendor inside THIS client's directory, exactly once, in the same transaction.
-  await db.run("UPDATE tasks SET status = 'completed' WHERE id = ? AND status = 'active'", [session.task_id]);
+  await db.run("UPDATE tasks SET status = 'completed', token_revoked = 1 WHERE id = ? AND status = 'active'", [session.task_id]);
   await logAudit(req.user.userId, 'SESSION_COMPLETED', { sessionId: session.id });
+  // A completed session must close exactly like a terminated one: the host agent used to keep running (and accepting input)
+  // until the original time window ran out, because nothing told it the task was over.
+  timers.cancel(session.task_id);
+  remoteControl.teardown(session.task_id, 'completed');
+  cutStream(session.task_id, 'completed', 'Session completed.');
 
   const payload = { taskId: session.task_id, reason: 'completed', message: 'Session completed.', status: 'completed' };
   emitToUser(session.client_id, 'session-ended', payload);
@@ -1395,9 +1608,9 @@ app.get('/api/agent/scope', async (req, res) => {
   const header = req.headers['authorization'];
   const { payload, code } = readToken(header && header.split(' ')[1]);
   if (!payload || payload.scope !== 'agent') return res.status(401).json({ error: AUTH_MESSAGES[code] || AUTH_MESSAGES.TOKEN_INVALID, code: code || 'TOKEN_INVALID' });
-  const task = await db.get('SELECT id, client_id, status, allowed_apps, allowed_paths, alerts_enabled, window_end FROM tasks WHERE id = ?', [Number(payload.taskId)]);
+  const task = await db.get('SELECT id, client_id, status, token_revoked, allowed_apps, allowed_paths, alerts_enabled, window_end FROM tasks WHERE id = ?', [Number(payload.taskId)]);
   if (!task || task.client_id !== Number(payload.userId)) return res.status(404).json({ error: 'Task not found.' });
-  if (!['pending', 'active'].includes(task.status)) return res.status(409).json({ error: `This task is already ${task.status}.` });
+  if (!['pending', 'active'].includes(task.status) || task.token_revoked) return res.status(409).json({ error: `This task is already ${task.status}.` });
   res.json({
     taskId: task.id,
     allowedApps: taskScope.readList(task.allowed_apps),
@@ -1431,5 +1644,6 @@ server.listen(PORT, HOST, () => {
   console.log(` Realtime:  Socket.IO on the same port`);
   console.log(` Database:  ${db.driver}`);
   console.log(` ${describeIceSetup()}`);
+  console.log(` ${billing.describe()}`);
   console.log('====================================================');
 });

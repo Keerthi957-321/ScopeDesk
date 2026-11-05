@@ -64,6 +64,10 @@ function ownWindowBounds() {
 }
 function reportOwnWindow() { if (runner) runner.setOwnWindow(ownWindowBounds()); }
 
+function isRazorpayUrl(url) {
+  try { const u = new URL(url); return u.protocol === 'https:' && (u.hostname === 'razorpay.com' || u.hostname.endsWith('.razorpay.com')); } catch (_) { return false; }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1280, height: 860, minWidth: 980, minHeight: 640, show: false, backgroundColor: '#0b1a24', title: 'ScopeDesk',
@@ -77,10 +81,20 @@ function createWindow() {
     if (isTrustedSender(url, SERVER_URL) && /\/remote-viewport\.html(\?|$)/.test(url)) {
       return { action: 'allow', overrideBrowserWindowOptions: { width: 1600, height: 900, autoHideMenuBar: true, backgroundColor: '#000000', title: 'ScopeDesk - Remote workspace', webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } } };
     }
+    // Razorpay Checkout opens its own popup for netbanking / card 3-D Secure. It must stay inside the app (an external browser
+    // cannot report the result back to the page). Isolated, no preload, no Node: it is just a web page from Razorpay.
+    if (isRazorpayUrl(url)) {
+      return { action: 'allow', overrideBrowserWindowOptions: { width: 480, height: 720, autoHideMenuBar: true, title: 'Secure payment', webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } } };
+    }
     if (/^https:\/\//i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
-  win.webContents.on('did-create-window', (child) => {
+  win.webContents.on('did-create-window', (child, details) => {
+    if (details && isRazorpayUrl(details.url)) {
+      // Payment popup: the bank's pages are on other domains, so navigation inside it is allowed, but it never opens more windows
+      child.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      return;
+    }
     child.maximize();   // the workspace uses the whole display
     child.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     child.webContents.on('will-navigate', (e, u) => { if (!isTrustedSender(u, SERVER_URL)) e.preventDefault(); });

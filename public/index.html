@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ScopeDesk - Secure Remote Support Sandbox</title>
-    <link rel="stylesheet" href="style.css?v=5">
+    <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
 
@@ -208,7 +208,7 @@
                     <span id="breachWhat">-</span>
                 </div>
                 <div class="breach-actions">
-                    <button type="button" class="btn-danger btn-terminate-big" id="btnBreachTerminate">Terminate Connection</button>
+                    <button type="button" class="btn-danger btn-terminate-big btn-kill-switch" id="btnBreachTerminate">Terminate Session Now</button>
                     <button type="button" class="btn-ghost" id="btnBreachResume">Resume session</button>
                 </div>
             </div>
@@ -463,7 +463,8 @@
                             <span class="switch-text"><strong>Alert me about breaches and terminations</strong><br><small>Show a warning on my screen if the vendor breaks the rules or the session is ended. The protection itself always stays on.</small></span>
                         </label>
                     </div>
-                    <button type="submit" class="btn-primary w-100 style-margin-top">Publish Request &amp; Issue Token</button>
+                    <div id="taskPriceNote" class="task-price-note" role="status" aria-live="polite" hidden></div>
+                    <button type="submit" id="btnIssueToken" class="btn-primary w-100 style-margin-top">Publish Request &amp; Issue Token</button>
                 </form>
             </div>
         </div>
@@ -528,7 +529,7 @@
                 <div><strong>Accessed:</strong> <code id="violationProcess">-</code></div>
             </div>
             <div class="violation-actions">
-                <button type="button" class="btn-danger" id="btnTerminateNow">Terminate Connection</button>
+                <button type="button" class="btn-danger btn-kill-switch" id="btnTerminateNow">Terminate Session Now</button>
                 <button type="button" class="btn-ghost" id="btnDismissViolation">Resume session</button>
                 <button type="button" class="btn-ghost" id="btnReviewViolation">Review</button>
             </div>
@@ -547,6 +548,8 @@
                 <div><dt>When</dt><dd id="termWhen">-</dd></div>
             </dl>
             <p class="termination-note">All remote connections were closed and this computer was locked. Nothing on it can be controlled remotely.</p>
+            <button type="button" id="btnTermKill" class="btn-kill-switch termination-kill">Terminate Session Now</button>
+            <p id="termKillStatus" class="termination-kill-status" role="status" aria-live="polite"></p>
             <button type="button" id="btnTermAck" class="termination-ack">I understand</button>
         </div>
     </div>
@@ -577,8 +580,8 @@
     <script src="screen-share.js?v=20261029a"></script>
     <script src="remote-input.js?v=20261031a"></script>
     <script src="webrtc.js?v=20261029v10"></script>
-    <script src="desktop-bridge.js?v=20261030a"></script>
-    <script src="script.js?v=20261029v10"></script>
-    <script src="build-check.js?v=20261029v10"></script>
+    <script src="desktop-bridge.js?v=20261105a"></script>
+    <script src="script.js?v=20261105v11"></script>
+    <script src="build-check.js?v=20261105v11"></script>
 </body>
 </html>

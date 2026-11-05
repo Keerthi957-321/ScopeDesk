@@ -154,6 +154,36 @@ function initSqliteTables() {
   if (!taskCols.includes('allowed_apps')) sqliteDb.exec("ALTER TABLE tasks ADD COLUMN allowed_apps TEXT NOT NULL DEFAULT ''");
   // Client-chosen switch: may ScopeDesk show breach / termination alerts on this Client's screen? (Enforcement itself is never optional.)
   if (!taskCols.includes('alerts_enabled')) sqliteDb.exec('ALTER TABLE tasks ADD COLUMN alerts_enabled INTEGER NOT NULL DEFAULT 1');
+  // BILLING: 'legacy' (payments off / created before billing existed), 'free' (counts against the monthly allowance) or 'paid'.
+  // billing_month is "YYYY-MM" in the billing time zone, so the allowance check is a plain equality on an indexed column.
+  if (!taskCols.includes('billing')) sqliteDb.exec("ALTER TABLE tasks ADD COLUMN billing TEXT NOT NULL DEFAULT 'legacy'");
+  if (!taskCols.includes('billing_month')) sqliteDb.exec("ALTER TABLE tasks ADD COLUMN billing_month TEXT NOT NULL DEFAULT ''");
+  if (!taskCols.includes('amount_paise')) sqliteDb.exec('ALTER TABLE tasks ADD COLUMN amount_paise INTEGER NOT NULL DEFAULT 0');
+  if (!taskCols.includes('payment_order_id')) sqliteDb.exec('ALTER TABLE tasks ADD COLUMN payment_order_id INTEGER');
+  // TOKEN REVOCATION: set when a task ends (terminated / expired / completed). A revoked token can never open a session again.
+  if (!taskCols.includes('token_revoked')) {
+    sqliteDb.exec('ALTER TABLE tasks ADD COLUMN token_revoked INTEGER NOT NULL DEFAULT 0');
+    sqliteDb.exec("UPDATE tasks SET token_revoked = 1 WHERE status NOT IN ('pending', 'active')");   // tasks that already ended
+  }
+  sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_tasks_billing ON tasks (client_id, billing, billing_month)');
+  sqliteDb.exec(`
+    CREATE TABLE IF NOT EXISTS payment_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_id INTEGER NOT NULL,
+      razorpay_order_id TEXT UNIQUE,
+      razorpay_payment_id TEXT,
+      amount_paise INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      duration_minutes INTEGER NOT NULL,
+      request_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'created' CHECK (status IN ('created', 'paid', 'fulfilled', 'unfulfilled')),
+      task_id INTEGER,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      paid_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_payment_orders_client ON payment_orders (client_id);
+  `);
   sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks (assigned_vendor_user_id)');
   sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_vendors_client ON vendors (client_id, vendor_user_id)');
   installTrustEngine();

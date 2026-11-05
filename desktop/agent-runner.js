@@ -162,14 +162,16 @@ function createAgentRunner({ agentDir, serverUrl, forkFn = fork, execPath = proc
 
   function freeze() { if (child && inited) { try { child.send({ type: 'freeze' }); } catch (_) { /* gone */ } } }
 
-  function stop(reason = 'stopped') {
+  function stop(reason = 'stopped', { hard = false } = {}) {
     const c = child;
     if (!c) return { ok: true };                          // already stopped: stopping twice is harmless
     const taskId = status.taskId;
     child = null; inited = false;
     if (reason !== 'restart' && taskId != null && !blocked.has(taskId)) blocked.set(taskId, 'stopped');   // no automatic restart after a Stop
     try { c.send({ type: 'stop' }); } catch (_) { /* already gone */ }   // lets the agent release held keys and buttons
-    const killer = setTimeout(() => { try { c.kill(); } catch (_) { /* ignore */ } }, 1500);
+    // The agent refuses input from the moment it reads 'stop'. The forced kill is the backstop; a hard stop (kill switch,
+    // termination, breach) only leaves it time to release held keys and mouse buttons.
+    const killer = setTimeout(() => { try { c.kill(); } catch (_) { /* ignore */ } }, hard ? 600 : 1500);
     if (killer.unref) killer.unref();
     c.once('exit', () => clearTimeout(killer));
     set({ ...IDLE, detail: reason === 'restart' ? '' : status.detail });
@@ -184,7 +186,7 @@ function createAgentRunner({ agentDir, serverUrl, forkFn = fork, execPath = proc
   function endTask(taskId, why = 'ended') {
     if (taskId == null) return;
     blocked.set(taskId, why);
-    if (status.taskId === taskId && child && inited) stop(why);
+    if (status.taskId === taskId && child && inited) stop(why, { hard: true });
   }
 
   function shutdown() { quitting = true; clearTimeout(rewarmTimer); const c = child; if (c) { child = null; try { c.send({ type: 'stop' }); } catch (_) { /* gone */ } setTimeout(() => { try { c.kill(); } catch (_) { /* gone */ } }, 300).unref(); } }

@@ -795,3 +795,27 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .share-picker button.tile[aria-pressed="true"] { border-color: #12a37f; box-shadow: 0 0 0 2px rgba(18,163,127,.25); }
 .share-picker button.tile span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .share-picker-note { font-size: 12px; color: #8a5a00; margin-top: 8px; min-height: 1em; }
+
+/* ================= KILL SWITCH: "Terminate Session Now" ================= */
+.btn-kill-switch {
+    background: #ffde00; color: #3b0000; border: 3px solid #fff; border-radius: 10px;
+    font: inherit; font-size: 17px; font-weight: 800; letter-spacing: .02em; text-transform: uppercase;
+    padding: 14px 26px; cursor: pointer; box-shadow: 0 0 0 4px rgba(255, 222, 0, .35), 0 8px 24px rgba(0, 0, 0, .35);
+    animation: killPulse 1.4s ease-in-out infinite;
+}
+.btn-kill-switch:hover { background: #fff27a; }
+.btn-kill-switch:focus-visible { outline: 4px solid #fff; outline-offset: 3px; }
+.btn-kill-switch[disabled] { opacity: .65; cursor: progress; animation: none; }
+.violation-actions .btn-kill-switch, .breach-actions .btn-kill-switch { font-size: 15px; padding: 13px 18px; }
+.termination-kill { display: block; width: 100%; margin: 0 0 10px; font-size: 20px; padding: 18px 24px; }
+.termination-kill-status { min-height: 1.4em; margin-bottom: 14px; font-weight: 600; }
+@keyframes killPulse { 0%, 100% { box-shadow: 0 0 0 4px rgba(255, 222, 0, .35), 0 8px 24px rgba(0,0,0,.35); } 50% { box-shadow: 0 0 0 10px rgba(255, 222, 0, .15), 0 8px 24px rgba(0,0,0,.35); } }
+@media (prefers-reduced-motion: reduce) { .btn-kill-switch { animation: none; } }
+
+/* ================= TICKET FORM: price / free allowance ================= */
+.task-price-note { margin-top: 14px; padding: 10px 12px; border-radius: 6px; font-size: 13.5px; line-height: 1.45; border: 1px solid var(--border-light); }
+.task-price-note[hidden] { display: none; }
+.task-price-note.is-free { background: var(--badge-active-bg); color: var(--badge-active-txt); border-color: #b9e6d6; }
+.task-price-note.is-paid { background: var(--badge-pending-bg); color: #8a530a; border-color: #f3d6a8; }
+.task-price-note.is-loading { color: var(--text-muted); }
+.task-price-note strong { font-weight: 800; }

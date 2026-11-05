@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-10-29-v10';
+window.SCOPEDESK_BUILD = '2026-11-05-v11';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -855,8 +855,11 @@ document.addEventListener('DOMContentLoaded', () => {
         $('termTask').textContent = d.taskTitle || (d.taskId != null ? `#${d.taskId}` : '-');
         $('termVendor').textContent = d.vendor || 'Assigned vendor';
         $('termWhen').textContent = new Date(d.occurredAt || Date.now()).toLocaleString();
+        $('termKillStatus').textContent = '';
+        $('btnTermKill').disabled = false;
+        $('btnTermKill').classList.toggle('hidden', overlayTaskId == null);
         terminationOverlay.hidden = false;
-        $('btnTermAck').focus();
+        (overlayTaskId == null ? $('btnTermAck') : $('btnTermKill')).focus();
         ScopeDeskRTC.notifyTerminated({ reason: 'security_violation', taskId: d.taskId, title: d.taskTitle, detail: $('termWhat').textContent });
         loadTasks();
     }
@@ -868,8 +871,28 @@ document.addEventListener('DOMContentLoaded', () => {
         showTerminationOverlay({ ...d, taskId: d.taskId != null ? d.taskId : (STATE.live && STATE.live.taskId), taskTitle: STATE.live && STATE.live.title, vendor: STATE.live && STATE.live.vendor });
     });
     $('btnTermAck').addEventListener('click', hideTerminationOverlay);
-    // Keep keyboard focus inside the overlay while it is open
-    terminationOverlay.addEventListener('keydown', (e) => { if (e.key === 'Tab') { e.preventDefault(); $('btnTermAck').focus(); } });
+    // Kill switch on the breach overlay. The server may already have ended the task on its own; pressing it still kills the
+    // host agent on this PC, revokes the token and confirms the session is dead.
+    $('btnTermKill').addEventListener('click', () => {
+        const taskId = overlayTaskId;
+        if (taskId == null) return;
+        $('btnTermKill').disabled = true;
+        $('termKillStatus').textContent = 'Terminating...';
+        terminateTask(taskId, (res, ok) => {
+            $('termKillStatus').textContent = ok
+                ? 'Done. The session is closed, its token is revoked and remote control on this computer is stopped.'
+                : 'Remote control on this computer is stopped. The server could not be reached to confirm; it will close the session when it sees it.';
+            $('btnTermAck').focus();
+        });
+    });
+    // Keep keyboard focus inside the overlay while it is open (two buttons: kill switch and acknowledge)
+    terminationOverlay.addEventListener('keydown', (e) => {
+        if (e.key !== 'Tab') return;
+        e.preventDefault();
+        const order = [$('btnTermKill'), $('btnTermAck')].filter((b) => !b.classList.contains('hidden') && !b.disabled);
+        const i = order.indexOf(document.activeElement);
+        (order[(i + (e.shiftKey ? order.length - 1 : 1)) % order.length] || $('btnTermAck')).focus();
+    });
 
     function showViolationModal(alert) {
         STATE.pendingViolation = alert;
@@ -905,23 +928,64 @@ document.addEventListener('DOMContentLoaded', () => {
         STATE.pendingViolation = null;
     }
 
-    function terminateTask(taskId, onDone) {
-        ScopeDeskRTC.stop('closed'); // hang up and stop every capture track right now; do not wait for the server's answer
-        STATE.socket.emit('terminate-session', { taskId }, (res) => {
-            if (res && res.ok) {
-                toast('Session ended. The vendor has been disconnected.');
-            } else {
-                toast((res && res.error) || 'Could not terminate the session.', true);
-            }
-            if (onDone) onDone(res);
-            loadTasks();
+    // ===== HARD TERMINATION ("Terminate Session Now") =====
+    // 1. LOCAL, synchronously, before any network round-trip: hang up WebRTC, stop every capture track, and kill the host agent
+    //    on THIS PC (desktop app). Even with no connection to the server the vendor loses this computer at once.
+    // 2. SERVER: the WebSocket 'terminate-session' event revokes the token, drops the host agent's socket, empties the stream room
+    //    and force-terminates the vendor. If the socket is down or silent for 4 s, the same thing is sent over HTTPS instead.
+    const TERMINATE_ACK_MS = 4000;
+    const terminating = new Set();
+
+    function killLocally(taskId) {
+        try { ScopeDeskRTC.stop('closed'); } catch (_) { /* nothing to hang up */ }
+        try { window.ScopeDeskScreenShare && window.ScopeDeskScreenShare.stopAll(); } catch (_) { /* nothing captured */ }
+        try { ScopeDeskDesktop.endTask(taskId); } catch (_) { /* browser, or the app already stopped it */ }
+        if (STATE.live && STATE.live.taskId === taskId) { try { clearLive(); } catch (_) { /* already cleared */ } }
+    }
+
+    function terminateOverSocket(taskId) {
+        return new Promise((resolve) => {
+            const s = STATE.socket;
+            if (!s || !s.connected) return resolve(null);
+            let settled = false;
+            const timer = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, TERMINATE_ACK_MS);
+            s.emit('terminate-session', { taskId }, (res) => {
+                if (settled) return;
+                settled = true; clearTimeout(timer); resolve(res || null);
+            });
         });
+    }
+
+    async function terminateTask(taskId, onDone) {
+        if (taskId == null) return;
+        killLocally(taskId);
+        if (terminating.has(taskId)) return;        // a second click while the first one is still on its way
+        terminating.add(taskId);
+        let res = null;
+        try {
+            res = await terminateOverSocket(taskId);
+            if (!res || !res.ok) {
+                // WebSocket down, slow, or refused: same kill over HTTPS (server side is idempotent)
+                try { res = await api(`/api/tasks/${encodeURIComponent(taskId)}/terminate`, { method: 'POST' }); }
+                catch (err) { res = res && res.error ? res : { ok: false, error: err.message }; }
+            }
+        } finally {
+            terminating.delete(taskId);
+        }
+        const ok = !!(res && (res.ok || res.success));
+        if (ok) toast(res.alreadyEnded ? 'Session is closed and its token is revoked. The vendor has no access.' : 'Session terminated. Token revoked and the vendor has been disconnected.');
+        else toast(`${(res && res.error) || 'Could not reach the server.'} Remote control on this computer was stopped anyway.`, true);
+        if (onDone) onDone(res, ok);
+        loadTasks();
+        return res;
     }
 
     // Two places offer the same decision: the alert dialog and the persistent banner on the dashboard
     function terminateFromAlert() {
         if (!STATE.pendingViolation) return;
-        terminateTask(STATE.pendingViolation.taskId, closeViolationModal);
+        const taskId = STATE.pendingViolation.taskId;
+        closeViolationModal();                       // the dialog goes away at once; the kill is already running locally
+        terminateTask(taskId);
     }
     function resumeFromAlert() {
         // "Resume session": the Client accepts the risk, the vendor's control is re-enabled (agent waits for an in-scope window again)
@@ -1170,10 +1234,132 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     newTaskForm.addEventListener('reset', () => setTimeout(() => { selectedApps.clear(); renderAppsList(); renderAppsSummary(); }, 0));
 
+    // ===== PRICE / FREE ALLOWANCE (display only) =====
+    // The SERVER decides. This only asks GET /api/billing/quote and shows the answer: "This task is FREE (N left)" or
+    // "Pay ₹X & Issue Token". Nothing here is sent back as "free"; POST /api/tasks re-checks the allowance in the database.
+    const FREE_LABEL = 'Publish Request & Issue Token';
+    const btnIssueToken = $('btnIssueToken');
+    const priceNote = $('taskPriceNote');
+    let quoteSeq = 0;
+    let lastQuote = null;
+    const formatInr = (inr) => Number(inr).toLocaleString('en-IN', { minimumFractionDigits: Number.isInteger(Number(inr)) ? 0 : 2, maximumFractionDigits: 2 });
+
+    function renderQuote(q) {
+        lastQuote = q;
+        priceNote.hidden = false;
+        priceNote.classList.remove('is-free', 'is-paid', 'is-loading');
+        if (!q) {
+            priceNote.classList.add('is-loading');
+            priceNote.textContent = 'Checking the price...';
+            btnIssueToken.textContent = FREE_LABEL;
+            return;
+        }
+        if (q.free) {
+            priceNote.classList.add('is-free');
+            const strong = document.createElement('strong');
+            strong.textContent = 'This task is FREE';
+            const rest = q.unlimited
+                ? ' (payments are switched off on this server, so every task is free).'
+                : ` - ${q.freeLeft} of ${q.freeLimit} free task${q.freeLimit === 1 ? '' : 's'} left this month (free tasks can be up to ${q.freeMaxMinutes} minutes).`;
+            priceNote.replaceChildren(strong, document.createTextNode(rest));
+            btnIssueToken.textContent = FREE_LABEL;
+            return;
+        }
+        priceNote.classList.add('is-paid');
+        const why = q.reason === 'duration'
+            ? `Free tasks can be up to ${q.freeMaxMinutes} minutes; this one is longer.`
+            : `You have used all ${q.freeLimit} free tasks for this month.`;
+        const strong = document.createElement('strong');
+        strong.textContent = `Price: ₹${formatInr(q.priceInr)}`;
+        priceNote.replaceChildren(strong, document.createTextNode(` - ${why} Free tasks left this month: ${q.freeLeft}.`));
+        btnIssueToken.textContent = `Pay ₹${formatInr(q.priceInr)} & Issue Token`;
+    }
+
+    async function refreshQuote() {
+        const seq = ++quoteSeq;
+        renderQuote(null);
+        try {
+            const q = await api(`/api/billing/quote?duration_minutes=${encodeURIComponent($('taskWindow').value)}`);
+            if (seq === quoteSeq) renderQuote(q);       // ignore answers to an older duration choice
+        } catch (err) {
+            if (seq !== quoteSeq) return;
+            lastQuote = null;
+            priceNote.hidden = false;
+            priceNote.classList.remove('is-free', 'is-paid');
+            priceNote.classList.add('is-loading');
+            priceNote.textContent = 'Could not check the price right now. The server will tell you when you submit.';
+            btnIssueToken.textContent = FREE_LABEL;
+        }
+    }
+    $('taskWindow').addEventListener('change', refreshQuote);
+
+    // ===== RAZORPAY CHECKOUT (only loaded when the server says a payment is needed) =====
+    const RAZORPAY_SRC = 'https://checkout.razorpay.com/v1/checkout.js';
+    let razorpayLoading = null;
+    function loadRazorpay() {
+        if (window.Razorpay) return Promise.resolve(window.Razorpay);
+        if (razorpayLoading) return razorpayLoading;
+        razorpayLoading = new Promise((resolve, reject) => {
+            const tag = document.createElement('script');
+            tag.src = RAZORPAY_SRC;
+            tag.async = true;
+            tag.onload = () => (window.Razorpay ? resolve(window.Razorpay) : reject(new Error('Razorpay did not load.')));
+            tag.onerror = () => { razorpayLoading = null; tag.remove(); reject(new Error('Could not load the Razorpay payment window. Check your internet connection and try again.')); };
+            document.head.appendChild(tag);
+        });
+        return razorpayLoading;
+    }
+
+    // Opens the payment window. Resolves with the created task after the server verified the payment, or null if the Client closed it.
+    async function payAndIssue(payment) {
+        const Razorpay = await loadRazorpay();
+        return new Promise((resolve, reject) => {
+            let finished = false;
+            const rzp = new Razorpay({
+                key: payment.keyId,
+                order_id: payment.orderId,            // amount and currency are bound to the order on Razorpay's side
+                amount: payment.amount,
+                currency: payment.currency,
+                name: payment.name,
+                description: payment.description,
+                prefill: payment.prefill || {},
+                theme: { color: '#008767' },
+                handler: async (resp) => {
+                    finished = true;
+                    try {
+                        const done = await api('/api/payments/verify', {
+                            method: 'POST',
+                            body: {
+                                razorpay_order_id: resp.razorpay_order_id,
+                                razorpay_payment_id: resp.razorpay_payment_id,
+                                razorpay_signature: resp.razorpay_signature
+                            }
+                        });
+                        resolve(done.task);
+                    } catch (err) { reject(err); }
+                },
+                modal: { ondismiss: () => { if (!finished) resolve(null); }, confirm_close: true }
+            });
+            rzp.on('payment.failed', (r) => {
+                const msg = (r && r.error && r.error.description) || 'The payment failed.';
+                toast(`${msg} No task was created. You can try again.`, true);
+            });
+            rzp.open();
+        });
+    }
+
+    function showIssuedToken(task) {
+        taskModal.classList.remove('open');
+        resetTaskForm();
+        $('newTokenValue').textContent = task.token;
+        $('newTokenNotice').classList.remove('hidden');
+        loadTasks();     // remote control is NOT started here: it starts when the Client approves the vendor (share dialog)
+    }
+
     $('btnOpenTaskModal').addEventListener('click', async () => {
         populateVendorSelect();
         taskModal.classList.add('open');
-        await Promise.all([loadVendors(), loadAppCatalog()]);   // refresh vendor accounts and the application list
+        await Promise.all([loadVendors(), loadAppCatalog(), refreshQuote()]);   // vendor accounts, application list, price
     });
     $('btnCloseModal').addEventListener('click', () => { taskModal.classList.remove('open'); resetTaskForm(); });
 
@@ -1184,9 +1370,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!vendorId) return toast('Choose the vendor this task is for.', true);
         if (task.length < 5) return toast('Describe the task (at least 5 characters).', true);
         if (!selectedApps.size) return toast('Choose at least one allowed application.', true);
-        const submit = newTaskForm.querySelector('button[type="submit"]');
+        const submit = btnIssueToken;
+        const label = submit.textContent;
         submit.disabled = true;
         try {
+            // The server answers EITHER with the finished task (free / payments off) OR with a Razorpay order (paid).
             const res = await api('/api/tasks', {
                 method: 'POST',
                 body: {
@@ -1197,15 +1385,25 @@ document.addEventListener('DOMContentLoaded', () => {
                     alerts_enabled: $('taskAlerts').checked
                 }
             });
-            taskModal.classList.remove('open');
-            resetTaskForm();
-            $('newTokenValue').textContent = res.task.token;
-            $('newTokenNotice').classList.remove('hidden');
-            loadTasks();     // remote control is NOT started here: it starts when the Client approves the vendor (share dialog)
+            if (!res.paymentRequired) {
+                // FREE: no payment window at all
+                showIssuedToken(res.task);
+                if (res.billing && res.billing.free && !res.billing.unlimited) toast(`Free task issued. Free tasks left this month: ${res.billing.freeLeftAfter}.`);
+                return;
+            }
+            // PAID: the server may have switched to paid since the quote (e.g. the last free task was used in another tab)
+            if (res.billing) renderQuote(res.billing);
+            submit.textContent = 'Waiting for payment...';
+            const paidTask = await payAndIssue(res.payment);
+            if (!paidTask) { toast('Payment window closed. No task was created and nothing was charged.'); return; }
+            showIssuedToken(paidTask);
+            toast('Payment received. Your token is ready.');
         } catch (err) {
             toast(err.message, true);
         } finally {
             submit.disabled = false;
+            if (submit.textContent === 'Waiting for payment...') submit.textContent = label;
+            if (taskModal.classList.contains('open')) refreshQuote();
         }
     });
     $('btnDismissToken').addEventListener('click', () => $('newTokenNotice').classList.add('hidden'));
