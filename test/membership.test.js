@@ -127,3 +127,36 @@ test('vendors cannot use the assistant or buy a membership', async () => {
   assert.equal((await ask(vendor)).status, 403);
   assert.equal((await h.call('POST', '/api/membership/checkout', { user: vendor, body: { plan: 'monthly' } })).status, 403);
 });
+
+test('assistant provider: a Gemini key uses the free Gemini endpoint; Gemini wins over OpenAI; no key = off', async () => {
+  const { createAssistant } = require('../server/assistant');
+  const seen = [];
+  const f = async (url, opts) => { seen.push({ url, auth: opts.headers.Authorization, body: JSON.parse(opts.body) }); return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'ok' } }] }) }; };
+  const g = createAssistant({ env: { GEMINI_API_KEY: 'AIzaTEST', OPENAI_API_KEY: 'sk-x' }, fetchImpl: f, log: quiet });
+  assert.equal(g.provider, 'gemini');
+  assert.equal(await g.reply([{ role: 'user', content: 'hi' }]), 'ok');
+  assert.match(seen[0].url, /generativelanguage\.googleapis\.com/);
+  assert.equal(seen[0].auth, 'Bearer AIzaTEST');
+  assert.equal(seen[0].body.model, 'gemini-2.5-flash');
+  assert.equal(seen[0].body.max_tokens, 600);
+  const o = createAssistant({ env: { OPENAI_API_KEY: 'sk-x' }, fetchImpl: f, log: quiet });
+  assert.equal(o.provider, 'openai');
+  await o.reply([{ role: 'user', content: 'hi' }]);
+  assert.match(seen[1].url, /api\.openai\.com/);
+  assert.equal(createAssistant({ env: {}, log: quiet }).configured, false);
+});
+
+test('assistant errors: a rejected key, an unknown model and a used-up quota each get their own code', async () => {
+  const { createAssistant } = require('../server/assistant');
+  const failing = (status, message) => async () => ({ ok: false, status, json: async () => [{ error: { message } }] });
+  const run = async (status, message) => {
+    const a = createAssistant({ env: { GEMINI_API_KEY: 'AIzaBAD' }, fetchImpl: failing(status, message), log: quiet });
+    try { await a.reply([{ role: 'user', content: 'hi' }]); return 'no error'; } catch (e) { return e.code; }
+  };
+  assert.equal(await run(400, 'API key not valid. Please pass a valid API key.'), 'AI_AUTH');
+  assert.equal(await run(403, 'Permission denied'), 'AI_AUTH');
+  assert.equal(await run(404, 'models/gemini-x is not found'), 'AI_MODEL');
+  assert.equal(await run(429, 'You exceeded your current quota'), 'AI_QUOTA');
+  assert.equal(await run(429, 'Resource exhausted, retry'), 'AI_BUSY');
+  assert.equal(await run(500, 'boom'), 'AI_ERROR');
+});

@@ -55,7 +55,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const BUILD = '2026-11-05-v12'; // shown on the page so you can tell which version you are looking at
+const BUILD = '2026-11-05-v13'; // shown on the page so you can tell which version you are looking at
 const APP_URL = (process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`)).replace(/\/+$/, '');
 if (IS_PRODUCTION) app.set('trust proxy', 1); // behind Railway's proxy: real client IPs for rate limits
 
@@ -77,7 +77,7 @@ mailer.verify().catch(() => { /* already reported by verify() */ });
 // ================= PAYMENTS (Razorpay) =================
 // No RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET -> payments OFF: every task is free and unlimited (legacy behaviour). See server/billing.js.
 const billing = createBilling({ env: process.env, log: console });
-// AI assistant (OpenAI). Off when OPENAI_API_KEY is missing. Who may use it is decided per request from the client's plan.
+// AI assistant (Gemini or OpenAI). Off when neither GEMINI_API_KEY nor OPENAI_API_KEY is set. Who may use it is decided per request from the client's plan.
 const assistant = createAssistant({ env: process.env, log: console });
 
 // ================= CONSTANTS =================
@@ -1361,7 +1361,7 @@ app.get('/api/billing/status', authenticateToken, requireRole('client'), async (
 app.post('/api/chat', authenticateToken, requireRole('client'), async (req, res) => {
   const ent = await planFor(req.user.userId);
   if (!ent.chatbot) return res.status(402).json({ error: 'The AI assistant is included in the free trial and in Membership. Upgrade to keep using it.', code: 'MEMBERSHIP_REQUIRED' });
-  if (!assistant.configured) return res.status(503).json({ error: 'The AI assistant is not set up on this server yet (OPENAI_API_KEY is missing).', code: 'AI_NOT_CONFIGURED' });
+  if (!assistant.configured) return res.status(503).json({ error: 'The AI assistant is not set up on this server yet (add GEMINI_API_KEY or OPENAI_API_KEY in the server settings).', code: 'AI_NOT_CONFIGURED' });
   const limitKey = `chat|${req.user.userId}`;
   if (isLimited(limitKey, 40)) return res.status(429).json({ error: 'You have sent a lot of questions. Please wait a few minutes.' });
   recordAttempt(limitKey, 60 * 60 * 1000);
@@ -1372,7 +1372,15 @@ app.post('/api/chat', authenticateToken, requireRole('client'), async (req, res)
     res.json({ reply });
   } catch (err) {
     console.error('[AI] chat failed:', err.code || err.message);
-    res.status(502).json({ error: err.code === 'AI_BUSY' ? 'The AI assistant is busy. Try again in a minute.' : 'The AI assistant could not answer right now. Please try again.', code: err.code || 'AI_ERROR' });
+    const keyName = assistant.provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY';
+    const messages = {
+      AI_AUTH: `The AI service rejected the API key. The administrator should check ${keyName} in the server settings (Railway > Variables).`,
+      AI_QUOTA: 'The AI service account has run out of free usage or credit. The administrator should check the AI account.',
+      AI_BUSY: 'The AI assistant is busy right now. Please try again in a minute.',
+      AI_MODEL: `The AI model "${assistant.model}" is not available for this key. The administrator can set ${assistant.provider === 'gemini' ? 'GEMINI_MODEL' : 'OPENAI_MODEL'} to another model.`,
+      AI_UNREACHABLE: 'Could not reach the AI service. Please try again in a moment.'
+    };
+    res.status(502).json({ error: messages[err.code] || 'The AI assistant could not answer right now. Please try again.', code: err.code || 'AI_ERROR' });
   }
 });
 

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ScopeDesk - Secure Remote Support Sandbox</title>
-    <link rel="stylesheet" href="style.css?v=7">
+    <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 
@@ -561,20 +561,29 @@
     </div>
 
     <!-- ================= CLIENT: AI ASSISTANT ================= -->
-    <button type="button" id="chatLauncher" class="chat-launcher hidden" aria-controls="chatPanel" aria-expanded="false">&#10024; AI Assistant</button>
+    <button type="button" id="chatLauncher" class="chat-launcher hidden" aria-controls="chatPanel" aria-expanded="false">
+        <span class="chat-launcher-icon" aria-hidden="true">&#10024;</span><span>AI Assistant</span>
+    </button>
     <section id="chatPanel" class="chat-panel hidden" aria-labelledby="chatTitle">
         <header class="chat-head">
-            <div><h3 id="chatTitle">ScopeDesk Assistant</h3><span id="chatPlanLine" class="chat-plan-line"></span></div>
-            <button type="button" id="btnChatClose" class="chat-close" aria-label="Close assistant">&times;</button>
+            <div class="chat-avatar" aria-hidden="true">&#10024;</div>
+            <div class="chat-head-text"><h3 id="chatTitle">ScopeDesk Assistant</h3><span id="chatPlanLine" class="chat-plan-line"></span></div>
+            <button type="button" id="btnChatClear" class="chat-icon-btn" aria-label="Start a new conversation" title="New conversation">&#8635;</button>
+            <button type="button" id="btnChatClose" class="chat-icon-btn" aria-label="Close assistant" title="Close">&times;</button>
         </header>
         <div id="chatLog" class="chat-log" role="log" aria-live="polite"></div>
+        <div id="chatSuggestions" class="chat-suggestions" aria-label="Suggested questions"></div>
         <div id="chatLocked" class="chat-locked hidden">
+            <div class="chat-locked-icon" aria-hidden="true">&#128274;</div>
             <p id="chatLockedText">The AI assistant is part of Membership.</p>
             <button type="button" id="btnChatUpgrade" class="btn-primary">See membership</button>
         </div>
         <form id="chatForm" class="chat-form" novalidate>
-            <textarea id="chatInput" rows="2" maxlength="2000" placeholder="Ask about tasks, allowed apps, alerts..." aria-label="Your question"></textarea>
-            <button type="submit" id="btnChatSend" class="btn-primary">Send</button>
+            <div class="chat-input-wrap">
+                <textarea id="chatInput" rows="1" maxlength="2000" placeholder="Ask about tasks, apps, alerts..." aria-label="Your question"></textarea>
+                <button type="submit" id="btnChatSend" class="chat-send" aria-label="Send">&#10148;</button>
+            </div>
+            <p class="chat-hint">Enter to send &middot; Shift + Enter for a new line &middot; never share passwords or tokens here</p>
         </form>
     </section>
 
@@ -643,8 +652,8 @@
     <script src="remote-input.js?v=20261031a"></script>
     <script src="webrtc.js?v=20261029v10"></script>
     <script src="desktop-bridge.js?v=20261105a"></script>
-    <script src="membership.js?v=20261105a"></script>
-    <script src="script.js?v=20261105v12"></script>
-    <script src="build-check.js?v=20261105v12"></script>
+    <script src="membership.js?v=20261105b"></script>
+    <script src="script.js?v=20261105v13"></script>
+    <script src="build-check.js?v=20261105v13"></script>
 </body>
 </html>

@@ -99,6 +99,15 @@
   }
 
   // ---------- AI assistant ----------
+  const GREETING = 'Hi! I am your ScopeDesk Assistant. I can help you write a clear task, choose which apps to allow, fix screen sharing or remote control, and explain alerts. What do you need?';
+  const SUGGESTIONS = [
+    'Write a task description for me',
+    'Which apps should I allow?',
+    'Why is remote control not working?',
+    'What happens when an alert appears?'
+  ];
+  let lastQuestion = '';
+
   function renderChatAccess() {
     const s = status;
     $('chatLauncher').classList.toggle('hidden', !running);
@@ -109,58 +118,166 @@
     $('chatForm').classList.toggle('hidden', locked || offline);
     $('btnChatUpgrade').classList.toggle('hidden', !locked || !s.paymentsEnabled);
     $('chatLockedText').textContent = offline
-      ? 'The AI assistant is not switched on for this server yet. Ask your administrator to add OPENAI_API_KEY.'
-      : (s.trialEndsAt == null && s.plan === 'free'
+      ? 'The AI assistant is not switched on for this server yet. The administrator needs to add GEMINI_API_KEY (free) or OPENAI_API_KEY in the server settings.'
+      : (s.plan === 'free'
         ? 'Your free trial has ended. The AI assistant is part of Membership, together with unlimited tasks.'
         : 'The AI assistant is part of Membership.');
-    $('chatPlanLine').textContent = s.plan === 'trial' ? `Included in your free trial (${daysLeft(s.trialEndsAt)} days left)` : s.plan === 'member' ? 'Included in your membership' : s.plan === 'legacy' ? '' : 'Members only';
+    $('chatPlanLine').textContent = s.plan === 'trial' ? `Free trial · ${daysLeft(s.trialEndsAt)} days left` : s.plan === 'member' ? 'Included in your membership' : s.plan === 'legacy' ? 'Online' : 'Members only';
+    renderSuggestions();
   }
 
-  function addBubble(role, text) {
+  // Shows the suggestion chips only before the first question, and only when chatting is allowed
+  function renderSuggestions() {
+    const box = $('chatSuggestions');
+    const canChat = !$('chatForm').classList.contains('hidden');
+    box.replaceChildren();
+    box.classList.toggle('hidden', !canChat || history.length > 0);
+    if (!canChat || history.length > 0) return;
+    SUGGESTIONS.forEach((q) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chat-chip';
+      b.textContent = q;
+      b.addEventListener('click', () => ask(q));
+      box.appendChild(b);
+    });
+  }
+
+  // Light formatting for answers: paragraphs, "- " / "1. " lists and **bold**. Built from text nodes only, so nothing in an
+  // answer can ever run as HTML.
+  function inline(parent, text) {
+    String(text).split(/(\*\*[^*]+\*\*)/g).forEach((part) => {
+      if (!part) return;
+      if (/^\*\*[^*]+\*\*$/.test(part)) { const b = document.createElement('strong'); b.textContent = part.slice(2, -2); parent.appendChild(b); }
+      else parent.appendChild(document.createTextNode(part.replace(/`([^`]+)`/g, '$1')));
+    });
+  }
+  function formatAnswer(el, text) {
+    let list = null;
+    String(text).replace(/\r/g, '').split('\n').forEach((raw) => {
+      const line = raw.trim();
+      const bullet = /^[-*•]\s+(.*)$/.exec(line);
+      const number = /^(\d+)[.)]\s+(.*)$/.exec(line);
+      if (bullet || number) {
+        const want = number ? 'OL' : 'UL';
+        if (!list || list.tagName !== want) { list = document.createElement(want.toLowerCase()); el.appendChild(list); }
+        const li = document.createElement('li');
+        inline(li, bullet ? bullet[1] : number[2]);
+        list.appendChild(li);
+        return;
+      }
+      list = null;
+      if (!line) return;
+      const p = document.createElement('p');
+      inline(p, line.replace(/^#+\s*/, ''));
+      el.appendChild(p);
+    });
+  }
+
+  function scrollDown() { const log = $('chatLog'); log.scrollTop = log.scrollHeight; }
+
+  function addBubble(role, text, { retry = false } = {}) {
+    const row = document.createElement('div');
+    row.className = `chat-row chat-row-${role}`;
     const el = document.createElement('div');
     el.className = `chat-msg chat-${role}`;
-    el.textContent = text;          // plain text only, never HTML
-    $('chatLog').appendChild(el);
-    $('chatLog').scrollTop = $('chatLog').scrollHeight;
-    return el;
+    if (role === 'assistant') formatAnswer(el, text); else el.textContent = text;
+    row.appendChild(el);
+    if (role === 'assistant' && history.length) {
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'chat-mini';
+      copy.textContent = 'Copy';
+      copy.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(text); copy.textContent = 'Copied'; setTimeout(() => { copy.textContent = 'Copy'; }, 1500); }
+        catch (_) { copy.textContent = 'Could not copy'; }
+      });
+      row.appendChild(copy);
+    }
+    if (retry) {
+      const again = document.createElement('button');
+      again.type = 'button';
+      again.className = 'chat-mini chat-retry';
+      again.textContent = 'Try again';
+      again.addEventListener('click', () => { row.remove(); ask(lastQuestion); });
+      row.appendChild(again);
+    }
+    $('chatLog').appendChild(row);
+    scrollDown();
+    return row;
+  }
+
+  function addTyping() {
+    const row = document.createElement('div');
+    row.className = 'chat-row chat-row-assistant';
+    const el = document.createElement('div');
+    el.className = 'chat-msg chat-assistant chat-typing';
+    el.setAttribute('aria-label', 'The assistant is typing');
+    for (let i = 0; i < 3; i += 1) el.appendChild(document.createElement('span'));
+    row.appendChild(el);
+    $('chatLog').appendChild(row);
+    scrollDown();
+    return row;
+  }
+
+  function resetChat() {
+    history = [];
+    lastQuestion = '';
+    $('chatLog').replaceChildren();
+    addBubble('assistant', GREETING);
+    renderSuggestions();
+  }
+
+  function growInput() {
+    const t = $('chatInput');
+    t.style.height = 'auto';
+    t.style.height = `${Math.min(t.scrollHeight, 120)}px`;
   }
 
   function openChat(open) {
     $('chatPanel').classList.toggle('hidden', !open);
     $('chatLauncher').setAttribute('aria-expanded', String(open));
+    $('chatLauncher').classList.toggle('is-open', open);
     if (open) {
-      if (!$('chatLog').children.length) addBubble('assistant', 'Hi! I can help you write a clear task, choose which apps to allow, or explain an alert. What do you need?');
+      if (!$('chatLog').children.length) resetChat();
       refresh();
       setTimeout(() => { if (!$('chatForm').classList.contains('hidden')) $('chatInput').focus(); }, 0);
     }
   }
 
-  async function send(e) {
-    e.preventDefault();
-    if (sending || !deps) return;
-    const text = $('chatInput').value.trim();
-    if (!text) return;
-    $('chatInput').value = '';
+  async function ask(text) {
+    if (sending || !deps || !text) return;
+    lastQuestion = text;
     addBubble('user', text);
     history.push({ role: 'user', content: text });
+    renderSuggestions();
     sending = true;
     $('btnChatSend').disabled = true;
-    const typing = addBubble('assistant', 'Thinking...');
-    typing.classList.add('chat-typing');
+    const typing = addTyping();
     try {
       const res = await deps.api('/api/chat', { method: 'POST', body: { messages: history.slice(-12) } });
       typing.remove();
-      addBubble('assistant', res.reply);
       history.push({ role: 'assistant', content: res.reply });
+      addBubble('assistant', res.reply);
     } catch (err) {
       typing.remove();
       history.pop();                     // the question was not answered; do not send it again as context
-      addBubble('error', err.message);
+      addBubble('error', err.message, { retry: err.status !== 402 });
       if (err.status === 402) refresh();   // the trial or membership just ended
     } finally {
       sending = false;
       $('btnChatSend').disabled = false;
+      $('chatInput').focus();
     }
+  }
+
+  function send(e) {
+    e.preventDefault();
+    const text = $('chatInput').value.trim();
+    if (!text) return;
+    $('chatInput').value = '';
+    growInput();
+    ask(text);
   }
 
   function bind() {
@@ -169,8 +286,10 @@
     $('planModal').addEventListener('click', (e) => { if (e.target === $('planModal')) closePlans(); });
     $('chatLauncher').addEventListener('click', () => openChat($('chatPanel').classList.contains('hidden')));
     $('btnChatClose').addEventListener('click', () => openChat(false));
+    $('btnChatClear').addEventListener('click', resetChat);
     $('btnChatUpgrade').addEventListener('click', () => { openChat(false); openPlans(); });
     $('chatForm').addEventListener('submit', send);
+    $('chatInput').addEventListener('input', growInput);
     $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('chatForm').requestSubmit(); } });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('chatPanel').classList.contains('hidden')) openChat(false); });
   }
@@ -180,7 +299,7 @@
     // The assistant button shows at once; the plan card waits for the status. The server checks every message anyway.
     start() { running = true; $('chatLauncher').classList.remove('hidden'); render(); refresh(); },
     stop() {
-      running = false; status = null; history = [];
+      running = false; status = null; history = []; lastQuestion = '';
       $('planCard').classList.add('hidden'); $('chatLauncher').classList.add('hidden'); $('chatPanel').classList.add('hidden');
       $('chatLog').replaceChildren(); closePlans();
     },

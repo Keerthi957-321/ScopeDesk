@@ -1,13 +1,19 @@
 'use strict';
 /**
- * ScopeDesk AI assistant (OpenAI Chat Completions, called from the SERVER so the API key never reaches a browser).
+ * ScopeDesk AI assistant, called from the SERVER so the API key never reaches a browser.
  * Who may use it is decided by server.js from the client's plan (trial / member / payments-off), never by the page.
  *
- * Environment:
- *   OPENAI_API_KEY=sk-...          (required; without it the assistant is switched off)
+ * Environment (set ONE of the two keys; Gemini wins if both are set):
+ *   GEMINI_API_KEY=AIza...         Google Gemini (free key, no card: aistudio.google.com > Get API key)
+ *   GEMINI_MODEL=gemini-2.5-flash  (optional)
+ *   OPENAI_API_KEY=sk-...          OpenAI (needs billing credit)
  *   OPENAI_MODEL=gpt-4o-mini       (optional)
+ * Both use the same "chat completions" request format (Gemini offers an OpenAI-compatible endpoint).
  */
-const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+const PROVIDERS = {
+  gemini: { name: 'Google Gemini', url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', defaultModel: 'gemini-2.5-flash', tokenField: 'max_tokens' },
+  openai: { name: 'OpenAI', url: 'https://api.openai.com/v1/chat/completions', defaultModel: 'gpt-4o-mini', tokenField: 'max_completion_tokens' }
+};
 const MAX_MESSAGES = 12;            // conversation turns kept per request
 const MAX_CHARS = 2000;             // per message
 const MAX_TOTAL_CHARS = 12000;
@@ -44,19 +50,23 @@ function cleanMessages(list) {
 }
 
 function createAssistant({ env = process.env, fetchImpl = globalThis.fetch, log = console } = {}) {
-  const apiKey = String(env.OPENAI_API_KEY || '').trim();
-  const model = String(env.OPENAI_MODEL || 'gpt-4o-mini').trim();
-  const configured = !!apiKey;
+  const geminiKey = String(env.GEMINI_API_KEY || '').trim();
+  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  const providerKey = geminiKey ? 'gemini' : openaiKey ? 'openai' : null;
+  const provider = providerKey ? PROVIDERS[providerKey] : null;
+  const apiKey = geminiKey || openaiKey;
+  const model = provider ? String((providerKey === 'gemini' ? env.GEMINI_MODEL : env.OPENAI_MODEL) || provider.defaultModel).trim() : '';
+  const configured = !!provider;
 
   async function reply(messages, { clientName } = {}) {
     if (!configured) throw Object.assign(new Error('The AI assistant is not set up on this server.'), { code: 'NOT_CONFIGURED' });
     const system = SYSTEM_PROMPT + (clientName ? ` You are talking to the client "${String(clientName).slice(0, 80)}".` : '');
     let res;
     try {
-      res = await fetchImpl(OPENAI_URL, {
+      res = await fetchImpl(provider.url, {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages: [{ role: 'system', content: system }, ...messages], max_completion_tokens: 600 }),
+        body: JSON.stringify({ model, messages: [{ role: 'system', content: system }, ...messages], [provider.tokenField]: 600 }),
         signal: AbortSignal.timeout(30000)
       });
     } catch (err) {
@@ -64,8 +74,15 @@ function createAssistant({ env = process.env, fetchImpl = globalThis.fetch, log 
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      log.error(`[AI] OpenAI answered ${res.status}: ${(data && data.error && data.error.message) || 'no details'}`);
-      throw Object.assign(new Error('The AI service refused the request.'), { code: res.status === 401 ? 'AI_AUTH' : res.status === 429 ? 'AI_BUSY' : 'AI_ERROR' });
+      const detail = Array.isArray(data) ? data[0] : data;   // Gemini sometimes wraps the error in a list
+      log.error(`[AI] ${provider.name} answered ${res.status}: ${(detail && detail.error && detail.error.message) || 'no details'}`);
+      const msg = String((detail && detail.error && detail.error.message) || '');
+      // 401/403, or Gemini's 400 "API key not valid": the key is wrong. 404: the model name does not exist for this key.
+      const code = res.status === 401 || res.status === 403 || (res.status === 400 && /api key/i.test(msg)) ? 'AI_AUTH'
+        : res.status === 429 ? (/quota|billing|credit/i.test(msg) ? 'AI_QUOTA' : 'AI_BUSY')
+        : res.status === 404 ? 'AI_MODEL'
+        : 'AI_ERROR';
+      throw Object.assign(new Error('The AI service refused the request.'), { code });
     }
     const text = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
     if (typeof text !== 'string' || !text.trim()) throw Object.assign(new Error('The AI service sent an empty answer.'), { code: 'AI_ERROR' });
@@ -77,7 +94,8 @@ function createAssistant({ env = process.env, fetchImpl = globalThis.fetch, log 
     model,
     cleanMessages,
     reply,
-    describe: () => (configured ? `AI:        assistant on (OpenAI ${model})` : 'AI:        assistant OFF (set OPENAI_API_KEY to switch it on)')
+    provider: providerKey,
+    describe: () => (configured ? `AI:        assistant on (${provider.name} ${model})` : 'AI:        assistant OFF (set GEMINI_API_KEY or OPENAI_API_KEY to switch it on)')
   };
 }
 
