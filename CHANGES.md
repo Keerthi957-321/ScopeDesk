@@ -1,3 +1,14 @@
+# Update 15 (build 2026-11-05-v15): simpler layout, Remote Connection hub, Specific Window Only sharing
+
+| Change | Files |
+|---|---|
+| Removed the Command Center dashboard and every KPI tile (Analytics keeps its charts only). Clients land on Tickets, vendors on My Tasks | `public/index.html`, `public/workspace.js`, `public/script.js` |
+| Premium membership badge in the top bar (gold "Premium Member", "Premium Trial" with "Keep Premium", "Free plan" with "Upgrade"); the sidebar plan card is gone | `public/index.html`, `public/workspace.js`, `public/theme.css` |
+| NEW Remote Connection hub: live status ("Remote Access Enabled: Specific Window Only" / "Entire Screen" / ready / off), session facts, share / remote control / Terminate Session Now, and the two share modes as big cards | `public/index.html`, `public/workspace.js`, `public/theme.css` |
+| NEW share mode, enforced, not just displayed: "Specific Window Only" (default) hides whole screens in the browser picker and lists only windows in the desktop picker (nothing is pre-selected, no fallback to the main screen); a whole screen captured anyway is stopped at once and refused. Same check when changing what is shared | `public/share-mode.js`, `public/screen-share.js`, `public/webrtc.js`, `public/script.js` |
+| Share dialog: "What to share" switch and texts that follow the mode | `public/index.html`, `public/script.js` |
+| Tests | `test/share-mode.test.js` |
+
 # Update 14 (build 2026-11-05-v12): host agent never started (fixed), membership plans, AI assistant
 
 | Change | Files |

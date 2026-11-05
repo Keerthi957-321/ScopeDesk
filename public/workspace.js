@@ -140,7 +140,7 @@
   }
 
   // ---------- top bar ----------
-  const TITLES = { commandCenterPanel: 'Command Center', clientDashboardPanel: 'Tickets', vendorDashboardPanel: 'My Tasks', boardsPanel: 'Boards', analyticsPanel: 'Analytics', settingsPanel: 'Settings & Billing', sessionMonitorPanel: 'Remote Desktop' };
+  const TITLES = { remoteHubPanel: 'Remote Connection', clientDashboardPanel: 'Tickets', vendorDashboardPanel: 'My Tasks', boardsPanel: 'Boards', analyticsPanel: 'Analytics', settingsPanel: 'Settings & Billing', sessionMonitorPanel: 'Remote Desktop' };
   const PLAN_LABEL = { trial: 'Free trial', free: 'Free', member: 'Member', legacy: 'All features' };
   function renderTopbar() {
     const u = deps && deps.getUser();
@@ -156,125 +156,89 @@
     $('topbarTitle').textContent = TITLES[currentPanel] || 'ScopeDesk';
     $('topAvatar').textContent = u ? u.username.charAt(0).toUpperCase() : 'U';
     $('btnTopAssistant').classList.toggle('hidden', !isClient());
+    $('navRemoteLink').classList.toggle('hidden', !isClient());          // vendors use Remote Desktop instead
     const pill = $('topPlanPill');
     pill.classList.toggle('hidden', !isClient() || !plan);
     if (plan) {
       pill.className = `plan-pill plan-pill-${plan.plan}${!isClient() ? ' hidden' : ''}`;
       $('topPlanName').textContent = PLAN_LABEL[plan.plan] || plan.plan;
       const left = (ms) => Math.max(0, Math.ceil((ms - Date.now()) / DAY));
-      $('topPlanSub').textContent = plan.plan === 'trial' ? `${left(plan.trialEndsAt)}d left`
-        : plan.plan === 'member' ? `until ${new Date(plan.memberUntil).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`
-        : plan.plan === 'free' ? 'Upgrade' : '';
+      $('topPlanName').textContent = plan.plan === 'member' ? 'Premium Member' : plan.plan === 'trial' ? 'Premium Trial' : plan.plan === 'free' ? 'Free plan' : 'All features';
+      $('topPlanSub').textContent = plan.plan === 'trial' ? `${left(plan.trialEndsAt)} days left`
+        : plan.plan === 'member' ? `until ${new Date(plan.memberUntil).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`
+        : plan.plan === 'free' ? `${plan.freeLeft} of ${plan.freeLimit} free tasks left` : 'payments off';
+      $('topPlanCta').textContent = plan.plan === 'free' ? 'Upgrade' : plan.plan === 'trial' ? 'Keep Premium' : '';
+      $('topPlanCta').classList.toggle('hidden', !(plan.plan === 'free' || plan.plan === 'trial') || !plan.paymentsEnabled);
     }
     $('cmdkHint').textContent = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘ K' : 'Ctrl K';
   }
 
-  // ---------- COMMAND CENTER ----------
-  function sparkline(values, tone) {
-    const w = 120, hgt = 34, max = Math.max(1, ...values);
-    const step = values.length > 1 ? w / (values.length - 1) : w;
-    const pts = values.map((v, i) => [i * step, hgt - 3 - (v / max) * (hgt - 8)]);
-    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-    const area = `${line} L${w},${hgt} L0,${hgt} Z`;
-    const id = `sg${Math.random().toString(36).slice(2, 8)}`;
-    return s('svg', { class: `spark spark-${tone}`, viewBox: `0 0 ${w} ${hgt}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' },
-      s('defs', {}, s('linearGradient', { id, x1: '0', x2: '0', y1: '0', y2: '1' }, s('stop', { offset: '0%', class: 'spark-stop-a' }), s('stop', { offset: '100%', class: 'spark-stop-b' }))),
-      s('path', { d: area, fill: `url(#${id})` }),
-      s('path', { d: line, class: 'spark-line', fill: 'none' }),
-      s('circle', { cx: pts[pts.length - 1][0], cy: pts[pts.length - 1][1], r: '2.6', class: 'spark-dot' }));
-  }
-  function kpiCard({ label, value, sub, delta, series, tone, iconName, onClick }) {
-    const card = h(onClick ? 'button' : 'div', { class: `kpi kpi-${tone}`, type: onClick ? 'button' : null, onclick: onClick || null },
-      h('div', { class: 'kpi-top' }, h('span', { class: 'kpi-ico' }, icon(iconName)), h('span', { class: 'kpi-label', text: label })),
-      h('div', { class: 'kpi-value', text: value }),
-      h('div', { class: 'kpi-foot' },
-        delta != null ? h('span', { class: `kpi-delta ${delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat'}`, text: `${delta > 0 ? '+' : ''}${delta}` }) : null,
-        h('span', { class: 'kpi-sub', text: sub || '' })),
-      series ? sparkline(series, tone) : null);
-    return card;
-  }
-
-  function renderCommandCenter() {
-    const u = deps.getUser();
-    if (!u) return;
-    const hour = new Date().getHours();
-    $('ccGreeting').textContent = `${hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'}, ${u.username}`;
-    $('ccEyebrow').textContent = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' });
-    $('ccSub').textContent = isClient() ? 'Your support tickets, live sessions and security events at a glance.' : 'Your assigned tasks and live sessions at a glance.';
-    $('ccNewTask').classList.toggle('hidden', !isClient());
-
-    const all = tasks();
-    const created = (t) => toMs(t.created_at || t.window_start);
-    const days14 = perDay(all, created, 14);
-    const thisWeek = days14.slice(7).reduce((n, b) => n + b.value, 0);
-    const lastWeek = days14.slice(0, 7).reduce((n, b) => n + b.value, 0);
-    const live = all.filter((t) => t.status === 'active').length;
-    const waiting = all.filter((t) => t.status === 'pending').length;
-    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
-    const minutesSeries = perDay(all, created, 14, (t) => Number(t.duration_minutes) || 0).map((b) => b.value);
-    const monthMinutes = all.filter((t) => created(t) >= monthStart.getTime()).reduce((n, t) => n + (Number(t.duration_minutes) || 0), 0);
-    const kpis = $('ccKpis');
-    kpis.replaceChildren(
-      kpiCard({ label: isClient() ? 'Tickets this week' : 'Assigned this week', value: fmtNum(thisWeek), delta: thisWeek - lastWeek, sub: 'vs last week', series: days14.map((b) => b.value), tone: 'indigo', iconName: 'ticket', onClick: () => deps.route('overview-panel') }),
-      kpiCard({ label: 'Live sessions', value: fmtNum(live), sub: waiting ? `${waiting} waiting for a vendor` : 'nothing waiting', tone: 'green', iconName: 'live', onClick: live ? () => (isClient() ? deps.route('overview-panel') : deps.openSession()) : null }),
-      kpiCard({ label: 'Approved access this month', value: fmtMinutes(monthMinutes), sub: 'total time window', series: minutesSeries, tone: 'cyan', iconName: 'clock', onClick: () => deps.route('analyticsPanel') })
-    );
-    if (isClient()) {
-      const ev14 = perDay(alerts, (a) => toMs(a.occurred_at), 14);
-      const ev30 = alerts.filter((a) => toMs(a.occurred_at) > Date.now() - 30 * DAY).length;
-      kpis.appendChild(kpiCard({ label: 'Security events (30 days)', value: fmtNum(ev30), sub: ev30 ? 'each one ended its session' : 'no breaches', series: ev14.map((b) => b.value), tone: ev30 ? 'red' : 'slate', iconName: 'shield' }));
+  // ---------- REMOTE CONNECTION HUB ----------
+  // One clear answer to "what can my vendor see right now?", plus the share-mode choice (share-mode.js) and the session buttons.
+  const SM = () => window.ScopeDeskShareMode;
+  let hubSig = '';                  // buttons are rebuilt only when this changes (the 1-second clock must not steal focus)
+  function renderHub() {
+    if (!isClient() || !SM()) return;
+    const live = deps.getLive();
+    const share = deps.getShare();
+    const mode = SM().get();
+    const sharing = !!share.kind && ['waiting', 'connecting', 'live', 'lost'].includes(share.conn);
+    const status = $('hubStatus');
+    const facts = $('hubFacts');
+    const actions = $('hubActions');
+    facts.replaceChildren();
+    let tone, kicker, title, text;
+    if (live && sharing) {
+      const win = share.kind === 'window';
+      tone = win ? 'safe' : 'wide';
+      kicker = share.conn === 'live' ? 'Live now' : share.conn === 'lost' ? 'Reconnecting' : 'Waiting for the vendor to connect';
+      title = `Remote Access Enabled: ${win ? 'Specific Window Only' : 'Entire Screen'}`;
+      text = win ? 'Your vendor sees only the window you picked. The rest of your desktop is private.'
+        : 'Your vendor can see everything on your screen. Close anything private, or switch to Specific Window Only.';
+    } else if (live) {
+      tone = 'ready';
+      kicker = 'Vendor is ready';
+      title = 'Not sharing yet';
+      text = `When you share, your vendor will see: ${SM().label(mode)}.`;
     } else {
-      const done30 = all.filter((t) => t.status === 'completed' && created(t) > Date.now() - 30 * DAY).length;
-      kpis.appendChild(kpiCard({ label: 'Completed (30 days)', value: fmtNum(done30), sub: 'finished inside the rules', tone: 'blue', iconName: 'check' }));
+      tone = 'off';
+      kicker = 'Status';
+      title = 'Remote access is off';
+      text = 'Nothing on this computer is shared. When a vendor accepts one of your tickets, you can share from here.';
+    }
+    status.className = `hub-status hub-${tone}`;
+    $('hubKicker').textContent = kicker;
+    $('hubTitle').textContent = title;
+    $('hubText').textContent = text;
+
+    const fact = (k, v) => { if (v) facts.append(h('div', {}, h('dt', { text: k }), h('dd', { text: v }))); };
+    const btn = (label, cls, fn) => h('button', { type: 'button', class: cls, onclick: fn, text: label });
+    const lt = live ? deps.getLiveText() : null;
+    if (live) {
+      fact('Vendor', live.vendor);
+      fact('Task', live.title);
+      fact('Time left', lt.clock && lt.clock !== '--:--' ? lt.clock : '');
+      fact('Remote control', String(lt.agent || '').split(' (')[0].split(':')[0]);
+    }
+    const sig = [tone, live ? live.taskId : '', sharing, mode, lt ? lt.canControl : '', lt ? lt.controlLabel : ''].join('|');
+    if (sig !== hubSig) {
+    hubSig = sig;
+    actions.replaceChildren();
+    if (live) {
+      actions.append(btn(sharing ? 'Change what I share' : (mode === 'window' ? 'Share a window' : 'Share my screen'), 'btn-accent', deps.openShareDialog));
+      if (lt.canControl && sharing) actions.append(btn(lt.controlLabel || 'Start remote control', 'btn-ghost-dark', deps.toggleRemoteControl));
+      actions.append(btn('Terminate Session Now', 'btn-danger hub-kill', () => { if (confirm('End the session now? The vendor is disconnected immediately.')) deps.terminateLive(); }));
+    } else {
+      actions.append(btn('Go to tickets', 'btn-ghost-dark', () => deps.route('overview-panel')), btn('+ New support task', 'btn-accent', deps.openNewTask));
+    }
     }
 
-    // Activity feed: ticket events + security events, newest first
-    const events = all.map((t) => ({ ms: created(t), kind: 'ticket', t }))
-      .concat(alerts.map((a) => ({ ms: toMs(a.occurred_at), kind: 'alert', a })))
-      .filter((e) => Number.isFinite(e.ms)).sort((a, b) => b.ms - a.ms).slice(0, 9);
-    const feed = $('ccActivity');
-    feed.replaceChildren();
-    if (!events.length) feed.appendChild(h('li', { class: 'empty-row' }, h('span', { text: isClient() ? 'No activity yet. Create your first support task to get started.' : 'No activity yet. Tasks your clients send you appear here.' })));
-    events.forEach((e) => {
-      if (e.kind === 'alert') {
-        feed.appendChild(h('li', { class: 'act act-red' }, h('span', { class: 'act-ico' }, icon('alert')),
-          h('div', { class: 'act-body' }, h('p', { class: 'act-title' }, h('strong', { text: 'Security event' }), ` on "${e.a.task_title || 'a task'}"`),
-            h('p', { class: 'act-sub', text: e.a.details || e.a.process_name || 'Out-of-scope activity' })),
-          h('time', { class: 'act-time', text: timeAgo(e.ms) })));
-        return;
-      }
-      const st = STATUS[e.t.status] || { label: e.t.status, tone: 'slate' };
-      feed.appendChild(h('li', { class: `act act-${st.tone}` }, h('span', { class: 'act-ico' }, icon('ticket')),
-        h('div', { class: 'act-body' },
-          h('p', { class: 'act-title' }, isClient() ? 'Ticket ' : 'Task ', h('strong', { text: `"${e.t.title}"` }), isClient() ? ` for ${counterparty(e.t)}` : ` from ${counterparty(e.t)}`),
-          h('p', { class: 'act-sub' }, h('span', { class: `chip chip-${st.tone}`, text: st.label }), ` ${e.t.duration_minutes || '-'} min · ${appsOf(e.t).slice(0, 3).join(', ') || 'no apps listed'}`)),
-        h('time', { class: 'act-time', text: timeAgo(e.ms) })));
-    });
-
-    // Right now
-    const now = $('ccNow');
-    now.replaceChildren();
-    const activeTask = all.find((t) => t.status === 'active');
-    if (activeTask) {
-      const end = toMs(activeTask.window_end);
-      now.appendChild(h('div', { class: 'now-live' },
-        h('div', { class: 'now-row' }, h('span', { class: 'pulse', 'aria-hidden': 'true' }), h('strong', { text: 'Live session' }), h('span', { class: 'muted', text: Number.isFinite(end) ? `ends ${new Date(end).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : '' })),
-        h('p', { class: 'now-title', text: activeTask.title }),
-        h('p', { class: 'muted', text: `${isClient() ? 'Vendor' : 'Client'}: ${counterparty(activeTask)}` }),
-        h('button', { type: 'button', class: 'btn-accent small', text: isClient() ? 'Go to the live session' : 'Open Remote Desktop', onclick: () => (isClient() ? deps.route('overview-panel') : deps.openSession()) })));
-    } else {
-      now.appendChild(h('div', { class: 'now-idle' }, h('span', { class: 'idle-dot', 'aria-hidden': 'true' }),
-        h('div', {}, h('strong', { text: 'No live session' }), h('p', { class: 'muted', text: waiting ? `${waiting} ticket${waiting > 1 ? 's are' : ' is'} waiting for a vendor to connect.` : 'Nobody has remote access to this workspace right now.' }))));
-    }
-
-    const quick = $('ccQuick');
-    quick.replaceChildren();
-    const qa = (label, iconName, fn) => h('button', { type: 'button', class: 'qa', onclick: fn }, h('span', { class: 'qa-ico' }, icon(iconName)), h('span', { text: label }));
-    if (isClient()) quick.appendChild(qa('New support task', 'plus', deps.openNewTask));
-    quick.appendChild(qa('Open board', 'board', () => deps.route('boardsPanel')));
-    if (isClient()) quick.appendChild(qa('Ask the AI assistant', 'spark', deps.openAssistant));
-    quick.appendChild(qa('View analytics', 'chart', () => deps.route('analyticsPanel')));
-    if (isClient()) quick.appendChild(qa('Plans & billing', 'card', () => deps.route('settingsPanel')));
+    // mode cards
+    document.querySelectorAll('#hubModes [data-share-choice]').forEach((c) => c.setAttribute('aria-checked', String(c.dataset.shareChoice === mode)));
+    // sharing with the other mode than the one selected: offer to switch now
+    const mismatch = sharing && share.kind !== mode;
+    $('hubApply').classList.toggle('hidden', !mismatch);
+    if (mismatch) $('hubApplyText').textContent = `You are sharing ${share.kind === 'window' ? 'one window' : 'your entire screen'} right now. Switch to ${SM().label(mode)}?`;
   }
 
   // ---------- BOARDS ----------
@@ -298,7 +262,6 @@
       deps.toast(err.message, true);
     }
     renderBoard();
-    if (currentPanel === 'commandCenterPanel') renderCommandCenter();
   }
   async function deleteCard(card) {
     const i = board.indexOf(card);
@@ -486,17 +449,6 @@
     const since = Date.now() - rangeDays * DAY;
     const created = (t) => toMs(t.created_at || t.window_start);
     const inRange = tasks().filter((t) => created(t) >= since);
-    const ended = inRange.filter((t) => ['completed', 'terminated', 'expired'].includes(t.status));
-    const completed = inRange.filter((t) => t.status === 'completed').length;
-    const minutes = inRange.reduce((n, t) => n + (Number(t.duration_minutes) || 0), 0);
-    const events = isClient() ? alerts.filter((a) => toMs(a.occurred_at) >= since).length : inRange.reduce((n, t) => n + (Number(t.intrusion_count) || 0), 0);
-    $('anKpis').replaceChildren(
-      kpiCard({ label: 'Tickets', value: fmtNum(inRange.length), sub: `last ${rangeDays} days`, tone: 'indigo', iconName: 'ticket' }),
-      kpiCard({ label: 'Approved access', value: fmtMinutes(minutes), sub: inRange.length ? `avg ${Math.round(minutes / inRange.length)} min per ticket` : 'no tickets', tone: 'cyan', iconName: 'clock' }),
-      kpiCard({ label: 'Completion rate', value: ended.length ? `${Math.round((completed / ended.length) * 100)}%` : '-', sub: `${completed} of ${ended.length} finished normally`, tone: 'green', iconName: 'check' }),
-      kpiCard({ label: 'Security events', value: fmtNum(events), sub: events ? 'sessions ended for breaking scope' : 'clean record', tone: events ? 'red' : 'slate', iconName: 'shield' })
-    );
-
     // Tickets per day (per week for 90 days)
     let buckets = perDay(inRange, created, rangeDays);
     let label = (b) => new Date(b.start).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
@@ -628,7 +580,7 @@
     const mod = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘' : 'Ctrl';
     const sc = (keys, text) => h('li', {}, h('span', { class: 'keys' }, keys.map((k) => h('kbd', { text: k }))), h('span', { text }));
     $('setShortcuts').replaceChildren(h('ul', { class: 'shortcuts' },
-      sc([mod, 'K'], 'Search and commands'), sc(['T'], 'Switch light / dark mode'), sc(['G', 'C'], 'Go to Command Center'), sc(['G', 'T'], 'Go to Tickets'), sc(['G', 'B'], 'Go to Boards'),
+      sc([mod, 'K'], 'Search and commands'), sc(['T'], 'Switch light / dark mode'), sc(['G', 'R'], 'Go to Remote Connection'), sc(['G', 'T'], 'Go to Tickets'), sc(['G', 'B'], 'Go to Boards'),
       sc(['G', 'A'], 'Go to Analytics'), sc(['G', 'S'], 'Go to Settings & Billing'), sc(['N'], 'New support task (clients)'), sc(['Esc'], 'Close a dialog or the assistant')));
   }
 
@@ -636,7 +588,6 @@
   let cmdItems = [], cmdIndex = 0;
   function commands() {
     const list = [
-      { group: 'Go to', label: 'Command Center', icon: 'grid', run: () => deps.route('commandCenterPanel') },
       { group: 'Go to', label: isClient() ? 'Tickets' : 'My Tasks', icon: 'ticket', run: () => deps.route('overview-panel') },
       { group: 'Go to', label: 'Boards', icon: 'board', run: () => deps.route('boardsPanel') },
       { group: 'Go to', label: 'Analytics', icon: 'chart', run: () => deps.route('analyticsPanel') },
@@ -646,6 +597,9 @@
     list.push({ group: 'Appearance', label: 'Switch to dark mode', icon: 'settings', run: () => setTheme('dark') });
     list.push({ group: 'Appearance', label: 'Match my computer (light or dark)', icon: 'settings', run: () => setTheme('system') });
     if (isClient()) {
+      list.splice(1, 0, { group: 'Go to', label: 'Remote Connection', icon: 'monitor', run: () => deps.route('remoteHubPanel') });
+      list.push({ group: 'Remote access', label: 'Share: Specific Window Only', icon: 'monitor', run: () => { SM().set('window'); deps.route('remoteHubPanel'); } });
+      list.push({ group: 'Remote access', label: 'Share: Entire Screen', icon: 'monitor', run: () => { SM().set('screen'); deps.route('remoteHubPanel'); } });
       list.push({ group: 'Actions', label: 'New support task', icon: 'plus', hint: 'N', run: deps.openNewTask });
       list.push({ group: 'Actions', label: 'Ask the AI assistant', icon: 'spark', run: deps.openAssistant });
       list.push({ group: 'Actions', label: 'View plans & upgrade', icon: 'card', run: () => { settingsTab = 'billing'; deps.route('settingsPanel'); } });
@@ -732,7 +686,7 @@
     const k = e.key.toLowerCase();
     if (gPressed && Date.now() - gPressed < 1200) {
       gPressed = 0;
-      const to = { c: 'commandCenterPanel', t: 'overview-panel', b: 'boardsPanel', a: 'analyticsPanel', s: 'settingsPanel' }[k];
+      const to = { r: isClient() ? 'remoteHubPanel' : null, t: 'overview-panel', b: 'boardsPanel', a: 'analyticsPanel', s: 'settingsPanel' }[k];
       if (to) { e.preventDefault(); deps.route(to); }
       return;
     }
@@ -749,7 +703,7 @@
   function renderCurrent() {
     if (!running) return;
     renderTopbar();
-    if (currentPanel === 'commandCenterPanel') renderCommandCenter();
+    if (currentPanel === 'remoteHubPanel') renderHub();
     else if (currentPanel === 'analyticsPanel') renderAnalytics();
     else if (currentPanel === 'boardsPanel') renderBoard();
     else if (currentPanel === 'settingsPanel') renderSettings();
@@ -757,8 +711,17 @@
 
   function bind() {
     $('btnOpenCmdk').addEventListener('click', openCmdk);
-    $('ccSearch').addEventListener('click', openCmdk);
-    $('ccNewTask').addEventListener('click', () => deps.openNewTask());
+    // Remote Connection: the two big mode cards (radio group with arrow keys) and "Switch now"
+    const modeCards = [...document.querySelectorAll('#hubModes [data-share-choice]')];
+    modeCards.forEach((c) => c.addEventListener('click', () => { if (SM()) SM().set(c.dataset.shareChoice); }));
+    $('hubModes').addEventListener('keydown', (e) => {
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+      e.preventDefault();
+      const next = modeCards[(modeCards.indexOf(document.activeElement) + 1) % modeCards.length];
+      next.focus(); if (SM()) SM().set(next.dataset.shareChoice);
+    });
+    $('hubApplyBtn').addEventListener('click', () => deps.openShareDialog());
+    if (SM()) SM().onChange(() => { if (currentPanel === 'remoteHubPanel') renderHub(); });
     $('btnTopAssistant').addEventListener('click', () => deps.openAssistant());
     $('topPlanPill').addEventListener('click', () => { settingsTab = 'billing'; deps.route('settingsPanel'); });
     $('cmdk').addEventListener('mousedown', (e) => { if (e.target === $('cmdk')) closeCmdk(); });
@@ -791,7 +754,7 @@
     }));
     document.querySelectorAll('#setTabs .seg-btn').forEach((b) => b.addEventListener('click', () => { settingsTab = b.dataset.tab; renderSettings(); }));
     if (window.ScopeDeskPlans) ScopeDeskPlans.onChange((st) => { plan = st; renderTopbar(); if (currentPanel === 'settingsPanel') renderSettings(); });
-    setInterval(() => { if (running && currentPanel === 'commandCenterPanel' && !document.hidden) renderCommandCenter(); }, 60000);   // "5 min ago" stays true
+    setInterval(() => { if (running && currentPanel === 'remoteHubPanel' && !document.hidden) renderHub(); }, 1000);   // the time-left clock
   }
 
   window.ScopeDeskWorkspace = {
@@ -804,15 +767,17 @@
       renderCurrent();
       loadBoard();
     },
-    stop() { running = false; alerts = []; board = []; boardLoaded = false; plan = null; closeCmdk(); },
+    stop() { running = false; hubSig = ''; alerts = []; board = []; boardLoaded = false; plan = null; closeCmdk(); },
     onRoute(panelId) {
       currentPanel = panelId;
       if (!running) return;
-      if (panelId === 'commandCenterPanel' || panelId === 'analyticsPanel') loadAlerts().then(renderCurrent);
+      if (panelId === 'analyticsPanel') loadAlerts().then(renderCurrent);
       renderCurrent();
       const main = document.querySelector('.main-content'); if (main) main.scrollTop = 0;
     },
     onTasks() { renderCurrent(); },
+    // after the live bar has updated in the same tick (the hub reads its clock and remote-control text)
+    onRtc() { if (running && currentPanel === 'remoteHubPanel') setTimeout(renderHub, 0); },
     openPalette: openCmdk
   };
 })();

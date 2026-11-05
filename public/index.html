@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap">
     <link rel="stylesheet" href="style.css?v=9">
-    <link rel="stylesheet" href="theme.css?v=20261105c">
+    <link rel="stylesheet" href="theme.css?v=20261105d">
     <meta name="color-scheme" content="dark light">
     <script>
         // Theme before first paint (no flash): saved choice "light" | "dark" | "system" (default), system = follow the computer.
@@ -213,8 +213,8 @@
 
             <nav class="nav-menu" aria-label="Main">
                 <span class="nav-group">Workspace</span>
-                <a href="#" class="nav-item" data-target="commandCenterPanel" id="navCommandLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Command Center</span><kbd class="nav-kbd">G C</kbd></a>
                 <a href="#" class="nav-item active" data-target="overview-panel" id="navOverviewLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8a2 2 0 0 0 2-2h14a2 2 0 0 0 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 0-2 2H5a2 2 0 0 0-2-2v-2a2 2 0 0 0 0-4z"/><path d="M13 6v2M13 11v2M13 16v2"/></svg><span id="navOverviewText">Tickets</span><kbd class="nav-kbd">G T</kbd></a>
+                <a href="#" class="nav-item" data-target="remoteHubPanel" id="navRemoteLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M9 10l2 2 4-4"/></svg><span>Remote Connection</span><kbd class="nav-kbd">G R</kbd></a>
                 <a href="#" class="nav-item" data-target="boardsPanel" id="navBoardsLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18"/></svg><span>Boards</span><kbd class="nav-kbd">G B</kbd></a>
                 <a href="#" class="nav-item" data-target="analyticsPanel" id="navAnalyticsLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg><span>Analytics</span><kbd class="nav-kbd">G A</kbd></a>
                 <a href="#" class="nav-item" data-target="session-panel" id="navSessionLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Remote Desktop</span></a>
@@ -235,13 +235,15 @@
         <main class="main-content">
             <!-- TOP BAR: page title, global search (Ctrl/Cmd + K), plan badge -->
             <header class="topbar" id="topbar">
-                <div class="topbar-crumbs"><span class="crumb-root">ScopeDesk</span><span class="crumb-sep">/</span><span id="topbarTitle">Command Center</span></div>
+                <div class="topbar-crumbs"><span class="crumb-root">ScopeDesk</span><span class="crumb-sep">/</span><span id="topbarTitle">Tickets</span></div>
                 <button type="button" class="topbar-search" id="btnOpenCmdk" aria-label="Search and commands (Ctrl+K)">
                     <svg class="topbar-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><span>Search tickets, pages, actions...</span><kbd id="cmdkHint">Ctrl K</kbd>
                 </button>
                 <div class="topbar-right">
-                    <button type="button" class="plan-pill hidden" id="topPlanPill" aria-label="Your plan. Open Settings and Billing">
-                        <span class="plan-pill-dot" aria-hidden="true"></span><span id="topPlanName">Plan</span><span class="plan-pill-sub" id="topPlanSub"></span>
+                    <button type="button" class="plan-pill hidden" id="topPlanPill" aria-label="Your membership. Open Settings and Billing">
+                        <svg class="plan-pill-crown" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7l4.5 4L12 4l4.5 7L21 7l-2 12H5z"/></svg>
+                        <span class="plan-pill-text"><span id="topPlanName">Plan</span><span class="plan-pill-sub" id="topPlanSub"></span></span>
+                        <span class="plan-pill-cta" id="topPlanCta"></span>
                     </button>
                     <button type="button" class="theme-toggle" id="btnThemeToggle" data-theme-toggle aria-label="Switch to light mode" title="Switch light / dark mode"><svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
                     <button type="button" class="topbar-ai" id="btnTopAssistant" aria-label="Open the AI assistant"><svg class="topbar-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/></svg><span>Ask AI</span></button>
@@ -290,6 +292,7 @@
                         <p class="page-sub">Create a ticket for one vendor, choose what they may touch, and send them the one-time token. Signed in as <span class="profile-name">Client Admin</span>.</p>
                     </div>
                     <div class="page-actions">
+                        <button type="button" class="btn-ghost-dark" id="btnViewVendors">Vendors</button>
                         <button class="btn-primary" id="btnOpenTaskModal">+ New support task</button>
                     </div>
                 </header>
@@ -300,7 +303,7 @@
                     <button type="button" class="btn-table-action" id="btnDismissToken">Dismiss</button>
                 </div>
 
-                <section class="metrics-grid">
+                <section class="metrics-grid metrics-legacy" aria-hidden="true">
                     <div class="metric-card">
                         <div class="metric-header"><span class="metric-label">Live sessions</span><span>💻</span></div>
                         <div class="metric-value" id="clientActiveCount">00</div>
@@ -349,7 +352,7 @@
                     </div>
                 </header>
 
-                <section class="metrics-grid">
+                <section class="metrics-grid metrics-legacy" aria-hidden="true">
                     <div class="metric-card">
                         <div class="metric-header"><span class="metric-label">My Sessions</span><span>📥</span></div>
                         <div class="metric-value" id="vendorIncomingCount">00</div>
@@ -463,32 +466,58 @@
             </div>
 
 
-            <!-- ================= COMMAND CENTER (workspace.js) ================= -->
-            <div id="commandCenterPanel" class="pane-view hidden" data-title="Command Center">
+            <!-- ================= REMOTE CONNECTION HUB (workspace.js) ================= -->
+            <div id="remoteHubPanel" class="pane-view hidden" data-title="Remote Connection">
                 <header class="page-head">
                     <div>
-                        <p class="eyebrow" id="ccEyebrow">Overview</p>
-                        <h1 class="page-title" id="ccGreeting">Welcome back</h1>
-                        <p class="page-sub" id="ccSub">Everything happening in your ScopeDesk workspace.</p>
-                    </div>
-                    <div class="page-actions">
-                        <button type="button" class="btn-ghost-dark" id="ccSearch"><svg class="btn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Quick search <kbd>Ctrl K</kbd></button>
-                        <button type="button" class="btn-accent" id="ccNewTask">+ New support task</button>
+                        <p class="eyebrow">Remote access</p>
+                        <h1 class="page-title">Remote Connection</h1>
+                        <p class="page-sub">Choose exactly what your vendor can see. Share one window to keep the rest of your desktop private.</p>
                     </div>
                 </header>
-                <section class="kpi-grid" id="ccKpis" aria-label="Key numbers"></section>
-                <div class="cc-grid">
-                    <section class="panel-card">
-                        <div class="panel-card-head"><h2>Recent activity</h2><button type="button" class="link-quiet" data-go="overview-panel">All tickets &rarr;</button></div>
-                        <ol class="activity" id="ccActivity"></ol>
-                    </section>
-                    <section class="panel-card">
-                        <div class="panel-card-head"><h2>Right now</h2></div>
-                        <div id="ccNow" class="now-box"></div>
-                        <div class="panel-card-head" style="margin-top:18px"><h2>Quick actions</h2></div>
-                        <div class="quick-actions" id="ccQuick"></div>
-                    </section>
-                </div>
+
+                <section class="hub-status" id="hubStatus" role="status" aria-live="polite">
+                    <div class="hub-status-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path class="hub-check" d="M9 12l2 2 4-4"/></svg>
+                    </div>
+                    <div class="hub-status-body">
+                        <p class="hub-status-kicker" id="hubKicker">Status</p>
+                        <h2 class="hub-status-title" id="hubTitle">Remote access is off</h2>
+                        <p class="hub-status-text" id="hubText">Nothing on this computer is shared.</p>
+                        <dl class="hub-facts" id="hubFacts"></dl>
+                    </div>
+                    <div class="hub-actions" id="hubActions"></div>
+                </section>
+
+                <section class="hub-modes">
+                    <div class="hub-section-head">
+                        <h2>What the vendor can see</h2>
+                        <p class="muted">Applies every time you share. Saved on this device.</p>
+                    </div>
+                    <div class="mode-grid" role="radiogroup" aria-label="What to share" id="hubModes">
+                        <button type="button" class="mode-card" role="radio" aria-checked="true" data-share-choice="window">
+                            <span class="mode-badge">Recommended</span>
+                            <span class="mode-art mode-art-window" aria-hidden="true"><i></i><i></i><i class="on"></i><i></i></span>
+                            <span class="mode-name"><span class="mode-radio" aria-hidden="true"></span>Specific Window Only</span>
+                            <span class="mode-desc">The vendor sees and controls just the one window you pick. Your other apps, files and notifications stay private.</span>
+                        </button>
+                        <button type="button" class="mode-card" role="radio" aria-checked="false" data-share-choice="screen">
+                            <span class="mode-art mode-art-screen" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span>
+                            <span class="mode-name"><span class="mode-radio" aria-hidden="true"></span>Entire Screen</span>
+                            <span class="mode-desc">The vendor sees your whole screen. Use it only when the fix needs several windows. Unapproved apps are still blocked.</span>
+                        </button>
+                    </div>
+                    <div class="hub-apply hidden" id="hubApply" role="alert">
+                        <span id="hubApplyText"></span>
+                        <button type="button" class="btn-accent small" id="hubApplyBtn">Switch now</button>
+                    </div>
+                </section>
+
+                <section class="hub-promise">
+                    <div><strong>Only approved apps</strong><span>Anything outside the ticket ends the session at once.</span></div>
+                    <div><strong>Time-limited</strong><span>Access closes by itself when the time window ends.</span></div>
+                    <div><strong>One-click stop</strong><span>"Terminate Session Now" cuts the vendor off immediately.</span></div>
+                </section>
             </div>
 
             <!-- ================= BOARDS (workspace.js) ================= -->
@@ -531,7 +560,6 @@
                         </div>
                     </div>
                 </header>
-                <section class="kpi-grid" id="anKpis"></section>
                 <div class="an-grid">
                     <section class="panel-card span-2"><div class="panel-card-head"><h2>Tickets per day</h2><span class="muted" id="anBarsNote"></span></div><div class="chart" id="anBars"></div></section>
                     <section class="panel-card"><div class="panel-card-head"><h2>Outcomes</h2></div><div id="anOutcomes"></div></section>
@@ -807,9 +835,16 @@
         <div class="modal">
             <div class="modal-header"><h3 id="shareTitle">Your vendor is ready to connect</h3></div>
             <div class="modal-body">
-                <p><b id="shareVendor">The vendor</b> accepted your task and will see your <b>entire screen</b> and can control your mouse and keyboard until the timer ends or you terminate the session.</p>
+                <p><b id="shareVendor">The vendor</b> accepted your task and will see <b id="shareWhat">one window you choose</b> and can control it until the timer ends or you terminate the session.</p>
+                <div class="share-mode-row">
+                    <span class="share-mode-label">What to share</span>
+                    <div class="seg" role="radiogroup" aria-label="What to share" id="shareModeSeg">
+                        <button type="button" role="radio" class="seg-btn" data-share-mode="window" aria-checked="true">Specific Window Only</button>
+                        <button type="button" role="radio" class="seg-btn" data-share-mode="screen" aria-checked="false">Entire Screen</button>
+                    </div>
+                </div>
                 <p style="margin-top:10px">Task: <b id="shareTask">this task</b><br>Approved apps: <b id="shareApps">the approved app</b><br>Duration: <b id="shareDuration">the approved window</b></p>
-                <p style="margin-top:10px">Before you start: open <b id="shareProcess">the approved app</b> and keep the ScopeDesk desktop app open. Pressing the green button below approves this vendor, this task and the time window, and starts remote control. <span id="sharePickerHelp">The browser asks what to share: <b>Entire screen</b> lets the vendor control this computer; a <b>Window</b> or a <b>Tab</b> can only be watched.</span><span id="shareDesktopHelp" hidden>Choose what to share below: a whole <b>screen</b>, or one <b>window</b> (the vendor then sees and controls only that window). Either way only the approved apps can be used.</span></p>
+                <p style="margin-top:10px">Before you start: open <b id="shareProcess">the approved app</b> and keep the ScopeDesk desktop app open. Pressing the green button below approves this vendor, this task and the time window, and starts remote control. <span id="sharePickerHelp"></span><span id="shareDesktopHelp" hidden></span></p>
                 <div id="sharePicker" class="share-picker" hidden aria-label="What to share"></div>
                 <p id="sharePickerNote" class="share-picker-note" role="status"></p>
                 <div id="shareError" class="auth-error hidden" role="alert" style="margin-top:12px"></div>
@@ -825,13 +860,14 @@
     <script src="status-monitor.js?v=20261024gb"></script>
     <script src="remote-input-channel.js?v=20261025a"></script>
     <script src="rtc-channel-hub.js?v=20261025a"></script>
-    <script src="screen-share.js?v=20261029a"></script>
+    <script src="share-mode.js?v=20261105a"></script>
+    <script src="screen-share.js?v=20261105a"></script>
     <script src="remote-input.js?v=20261031a"></script>
-    <script src="webrtc.js?v=20261029v10"></script>
+    <script src="webrtc.js?v=20261105a"></script>
     <script src="desktop-bridge.js?v=20261105a"></script>
     <script src="membership.js?v=20261105c"></script>
-    <script src="workspace.js?v=20261105b"></script>
-    <script src="script.js?v=20261105v14"></script>
-    <script src="build-check.js?v=20261105v14"></script>
+    <script src="workspace.js?v=20261105d"></script>
+    <script src="script.js?v=20261105v15"></script>
+    <script src="build-check.js?v=20261105v15"></script>
 </body>
 </html>

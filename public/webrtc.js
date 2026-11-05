@@ -476,7 +476,8 @@
     if (Guard) {
       // The picker offers Entire screen, a Window or a browser Tab. Only an entire screen allows remote control: with a window or tab the
       // vendor can watch (the host agent turns input off and both screens say why). The desktop app shows its own screen/window picker.
-      if (!sharer) sharer = Guard.create({ requireEntireScreen: false, log: () => {} });
+      // The Client's choice in Remote Connection (share-mode.js) steers the picker and is verified on the result.
+      if (!sharer) sharer = Guard.create({ requireEntireScreen: false, log: () => {}, getMode: () => (window.ScopeDeskShareMode ? window.ScopeDeskShareMode.get() : null) });
       const r = await sharer.start();
       if (!r.ok) {
         let tip = r.tip || r.message || 'Screen sharing did not start.';
@@ -499,9 +500,10 @@
       try { await loadIceConfig(id); } catch (err) { stop(); throw new Error(err.message || 'Could not start screen sharing.'); }
     } else try {
       // Fallback when screen-share.js is not loaded (older page): the original capture
+      const hint = window.ScopeDeskShareMode ? window.ScopeDeskShareMode.captureHints() : { displaySurface: 'monitor', monitorTypeSurfaces: 'include' };
       stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { displaySurface: 'monitor', frameRate: { ideal: 30, max: 30 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false, monitorTypeSurfaces: 'include', selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude'
+        video: { displaySurface: hint.displaySurface, frameRate: { ideal: 30, max: 30 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false, monitorTypeSurfaces: hint.monitorTypeSurfaces, selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude'
       });
       await loadIceConfig(id);
     } catch (err) {
@@ -511,7 +513,7 @@
     }
     const track = stream.getVideoTracks()[0];
     track.contentHint = 'detail';               // favour sharp text over smooth motion
-    set({ shareSurface: (track.getSettings() || {}).displaySurface || null });
+    set({ shareSurface: (track.getSettings() || {}).displaySurface || null, shareMode: window.ScopeDeskShareMode ? window.ScopeDeskShareMode.get() : null });
     track.onended = () => stop('stopped');      // the Client pressed "Stop sharing"
     await join();
   }
@@ -593,7 +595,7 @@
     earlyIce = [];
     role = null; taskId = null; video = null; stage = null;
     clearTimeout(slowTimer); clearTimeout(stallTimer);
-    set({ conn: reason || 'idle', agent: 'unknown', input: 'none', halted: null, stopped: false, shareSurface: null, connectSlow: false, retrying: 0, everLive: false, path: null });
+    set({ conn: reason || 'idle', agent: 'unknown', input: 'none', halted: null, stopped: false, shareSurface: null, shareMode: null, connectSlow: false, retrying: 0, everLive: false, path: null });
     return was;
   }
 
@@ -695,8 +697,15 @@
   // live connection (no reconnect), and the host agent maps the vendor's pointer onto the new display.
   async function switchScreen() {
     if (role !== 'host' || !stream) throw new Error('Share your screen first.');
-    const ns = await navigator.mediaDevices.getDisplayMedia({ video: { displaySurface: 'monitor', frameRate: { ideal: 30, max: 30 } }, audio: false, selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude' });
+    const SM = window.ScopeDeskShareMode;
+    const hint = SM ? SM.captureHints() : { displaySurface: 'monitor', monitorTypeSurfaces: 'include' };
+    const ns = await navigator.mediaDevices.getDisplayMedia({ video: { displaySurface: hint.displaySurface, frameRate: { ideal: 30, max: 30 } }, audio: false, monitorTypeSurfaces: hint.monitorTypeSurfaces, selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude' });
     const nt = ns.getVideoTracks()[0];
+    const newSurface = (nt.getSettings() || {}).displaySurface;
+    if (SM && !SM.surfaceMatches(SM.get(), newSurface)) {
+      ns.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* stopped */ } });   // privacy: keep the current share, drop the wrong one
+      throw new Error(SM.get() === 'window' ? 'A whole screen was picked, but "Specific Window Only" is on. Pick one window instead.' : 'A window was picked, but "Entire Screen" is on. Pick your whole screen instead.');
+    }
     nt.contentHint = 'detail';
     const sender = pc && pc.getSenders().find((sn) => sn.track && sn.track.kind === 'video');
     if (sender) { await sender.replaceTrack(nt); tuneSender(sender); }
@@ -705,7 +714,7 @@
     old.getTracks().forEach((t) => { t.onended = null; try { t.stop(); } catch (_) { /* stopped */ } });
     nt.onended = () => stop('stopped');
     if (relay.video) relay.video.srcObject = ns;
-    set({ shareSurface: (nt.getSettings() || {}).displaySurface || null });
+    set({ shareSurface: newSurface || null, shareMode: SM ? SM.get() : null });
     diag('shared screen', 'switched');
   }
 

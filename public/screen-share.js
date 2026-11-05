@@ -31,6 +31,7 @@
 
   var TIP_PICK_SCREEN = 'In the window that opened, click the picture of your screen first so it is highlighted, then press Share. The Share button stays grey until you pick one.';
   var TIP_ENTIRE_SCREEN = 'Please choose "Entire screen" (not a window or a tab), click the picture of your screen so it is highlighted, then press Share.';
+  var TIP_ONE_WINDOW = 'You chose "Specific Window Only", but a whole screen was picked, so nothing was shared. Open the "Window" tab in the picker, click the window to share, then press Share. (To share everything, switch to "Entire Screen" in Remote Connection.)';
 
   /**
    * Maps a DOMException (or anything thrown) to a stable result.
@@ -179,6 +180,9 @@
     var onTip = opts.onTip || function () {};
     var onState = opts.onState || function () {};
     var requireEntireScreen = opts.requireEntireScreen !== false;
+    // getMode(): 'window' | 'screen' | null. When given, the picker is steered to that kind of surface AND the result is checked:
+    // in 'window' mode a whole monitor is released at once, before any picture leaves this computer.
+    var getMode = typeof opts.getMode === 'function' ? opts.getMode : null;
     var mediaDevices = opts.mediaDevices || (typeof navigator !== 'undefined' ? navigator.mediaDevices : null);
 
     var state = 'idle';
@@ -199,13 +203,15 @@
       s.getTracks().forEach(function (t) { try { t.stop(); } catch (_) { /* already stopped */ } });
     }
 
+    function currentMode() { try { var m = getMode && getMode(); return m === 'window' || m === 'screen' ? m : null; } catch (_) { return null; } }
     function request() {
+      var m = currentMode();
       var rich = {
-        video: { displaySurface: 'monitor', frameRate: { ideal: 30, max: 30 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        video: { displaySurface: m === 'window' ? 'window' : 'monitor', frameRate: { ideal: 30, max: 30 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
         selfBrowserSurface: 'exclude',
         surfaceSwitching: 'exclude',
-        monitorTypeSurfaces: 'include'
+        monitorTypeSurfaces: m === 'window' ? 'exclude' : 'include'   // window mode: the browser hides the "Entire screen" choices
       };
       return mediaDevices.getDisplayMedia(rich).catch(function (err) {
         // Old engines reject unknown keys; the cancel / deny cases must NOT be retried (it would open a second picker).
@@ -261,7 +267,15 @@
 
       var surface;
       try { surface = track.getSettings && track.getSettings().displaySurface; } catch (_) { surface = undefined; }
-      if (requireEntireScreen && surface && surface !== 'monitor') {
+      var mode = currentMode();
+      if (mode === 'window' && surface === 'monitor') {
+        stopTracks(got);                                  // privacy: a whole screen in window mode is never used
+        log('[screen-share] window mode, but a monitor was picked');
+        tip(TIP_ONE_WINDOW);
+        setState('needs-retry', { code: 'wrong-surface', surface: surface, mode: mode });
+        return { ok: false, code: 'wrong-surface', retryable: true, message: 'A whole screen was picked, but "Specific Window Only" is on.', tip: TIP_ONE_WINDOW };
+      }
+      if (mode !== 'window' && requireEntireScreen && surface && surface !== 'monitor') {
         stopTracks(got);                                  // the person chose a window or a tab: release it, ask again
         log('[screen-share] wrong surface: ' + surface);
         tip(TIP_ENTIRE_SCREEN);
@@ -305,5 +319,5 @@
     };
   }
 
-  return { create: create, stopAll: stopAll, showSessionClosed: showSessionClosed, describeEnd: describeEnd, classifyError: classifyError, bindTipElement: bindTipElement, TIP_PICK_SCREEN: TIP_PICK_SCREEN, TIP_ENTIRE_SCREEN: TIP_ENTIRE_SCREEN };
+  return { create: create, stopAll: stopAll, showSessionClosed: showSessionClosed, describeEnd: describeEnd, classifyError: classifyError, bindTipElement: bindTipElement, TIP_PICK_SCREEN: TIP_PICK_SCREEN, TIP_ENTIRE_SCREEN: TIP_ENTIRE_SCREEN, TIP_ONE_WINDOW: TIP_ONE_WINDOW };
 }));

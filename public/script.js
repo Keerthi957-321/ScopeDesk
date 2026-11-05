@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-11-05-v14';
+window.SCOPEDESK_BUILD = '2026-11-05-v15';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -711,9 +711,9 @@ document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('.profile-name').forEach((el) => { el.textContent = STATE.user.username; });
         $('navOverviewLink').setAttribute('data-target', isClient ? 'clientDashboardPanel' : 'vendorDashboardPanel');
         $('navOverviewText').textContent = isClient ? 'Tickets' : 'My Tasks';
-        // Land on the Command Center; a page you were on before a reload (Boards, Analytics...) is reopened
-        const WORKSPACE_PAGES = ['commandCenterPanel', 'boardsPanel', 'analyticsPanel', 'settingsPanel'];
-        routeToPanel(WORKSPACE_PAGES.includes(lastPanel) ? lastPanel : 'commandCenterPanel');
+        // Land on Tickets (My Tasks for vendors); a page you were on before a reload (Remote Connection, Boards...) is reopened
+        const WORKSPACE_PAGES = ['boardsPanel', 'analyticsPanel', 'settingsPanel'].concat(isClient ? ['remoteHubPanel'] : []);
+        routeToPanel(WORKSPACE_PAGES.includes(lastPanel) ? lastPanel : (isClient ? 'clientDashboardPanel' : 'vendorDashboardPanel'));
         ScopeDeskWorkspace.start();
 
         connectSocket();
@@ -1382,8 +1382,15 @@ document.addEventListener('DOMContentLoaded', () => {
         openNewTask: () => $('btnOpenTaskModal').click(),
         openAssistant: () => { const l = $('chatLauncher'); if (l && !l.classList.contains('hidden') && $('chatPanel').classList.contains('hidden')) l.click(); },
         openSession: () => $('navSessionLink').click(),
-        logout: () => logout()
+        logout: () => logout(),
+        // Remote Connection hub: what is shared right now + the same buttons as the live bar (one implementation for both)
+        getShare: () => ({ kind: currentShareKind(), conn: (STATE.rtcView || {}).conn || 'idle' }),
+        getLiveText: () => ({ clock: $('liveClock').textContent, agent: $('liveAgent').textContent, canControl: !$('btnPairAgent').classList.contains('hidden'), controlLabel: $('btnPairAgent').textContent }),
+        openShareDialog: () => openShareDialog(),
+        toggleRemoteControl: () => $('btnPairAgent').click(),
+        terminateLive: () => { if (STATE.live) terminateTask(STATE.live.taskId); }
     });
+    $('btnViewVendors').addEventListener('click', () => $('cardPartners').click());
 
     function showIssuedToken(task) {
         taskModal.classList.remove('open');
@@ -1854,9 +1861,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         $('btnShareScreen').classList.toggle('hidden', sharing);
         if ($('btnSwitchScreen')) $('btnSwitchScreen').classList.toggle('hidden', !(sharing && desktopApi));
-        if (v.shareSurface && v.shareSurface !== 'monitor') {
-            $('liveShare').textContent += ' (window only: remote control needs your entire screen)';
-        }
+        if (sharing && currentShareKind() === 'window') $('liveShare').textContent += ' (one window only)';
+        else if (sharing && currentShareKind() === 'screen') $('liveShare').textContent += ' (entire screen)';
     }
 
     function renderVendorState(v) {
@@ -1930,6 +1936,7 @@ document.addEventListener('DOMContentLoaded', () => {
         onPermission: () => syncAlertsButton(),
         onChange: (v) => {
             STATE.rtcView = v;
+            try { ScopeDeskWorkspace.onRtc(); } catch (_) { /* workspace not loaded */ }
             if (STATE.user && STATE.user.role === 'client') showLocalLockScreen(v);
             if (STATE.user && STATE.user.role === 'vendor') renderVendorState(v); else renderLiveBar();
         }
@@ -1937,11 +1944,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ----- Client: share screen (user gesture), pair agent, terminate -----
     // The ScopeDesk desktop app shares the main screen directly; only a browser shows a picker the Client must operate
+    // The share dialog follows the Client's choice in Remote Connection: "Specific Window Only" (private default) or "Entire Screen"
+    const shareMode = () => (window.ScopeDeskShareMode ? ScopeDeskShareMode.get() : 'screen');
     function syncShareHelp() {
         const desktopApp = !!(window.scopedeskDesktop && window.scopedeskDesktop.isDesktop);
-        if ($('sharePickerHelp')) $('sharePickerHelp').hidden = desktopApp;
-        if ($('shareDesktopHelp')) $('shareDesktopHelp').hidden = !desktopApp;
+        const win = shareMode() === 'window';
+        if ($('sharePickerHelp')) {
+            $('sharePickerHelp').hidden = desktopApp;
+            $('sharePickerHelp').textContent = win
+                ? 'Your browser will ask what to share: open the "Window" tab and click the one window the vendor may see. Whole screens are hidden, and a whole screen is refused if picked.'
+                : 'Your browser will ask what to share: choose "Entire screen" and click the picture of your screen.';
+        }
+        if ($('shareDesktopHelp')) {
+            $('shareDesktopHelp').hidden = !desktopApp;
+            $('shareDesktopHelp').textContent = win
+                ? 'Click the one window the vendor may see below. The rest of your desktop stays private.'
+                : 'Click the screen to share below.';
+        }
+        if ($('shareWhat')) $('shareWhat').textContent = win ? 'one window you choose' : 'your entire screen';
+        document.querySelectorAll('#shareModeSeg [data-share-mode]').forEach((b) => {
+            const on = b.dataset.shareMode === shareMode();
+            b.classList.toggle('active', on); b.setAttribute('aria-checked', String(on));
+        });
+        if ($('btnConfirmShare')) $('btnConfirmShare').textContent = win ? 'Share this window' : 'Share my screen';
     }
+    document.querySelectorAll('#shareModeSeg [data-share-mode]').forEach((b) => b.addEventListener('click', () => { if (window.ScopeDeskShareMode) ScopeDeskShareMode.set(b.dataset.shareMode); }));
+    if (window.ScopeDeskShareMode) ScopeDeskShareMode.onChange(() => {
+        syncShareHelp();
+        if ($('shareModal').classList.contains('open')) { pickedSource = null; loadSources(); }
+        renderLiveBar();
+        try { ScopeDeskWorkspace.onRtc(); } catch (_) { /* workspace not loaded */ }
+    });
     // The approval dialog lists everything the Client approves: vendor, task, approved apps, duration
     function fillShareScope(taskId, apps, minutes) {
         const t = STATE.tasks.find((x) => x.id === taskId) || {};
@@ -1957,7 +1990,7 @@ document.addEventListener('DOMContentLoaded', () => {
     //   window -> watch only (the host agent turns input off and both screens say why)
     var desktopApi = window.scopedeskDesktop && window.scopedeskDesktop.isDesktop && typeof window.scopedeskDesktop.listSources === 'function' ? window.scopedeskDesktop : null;
     var displays = [];             // screens only (var: renderLiveBar, declared earlier, may run before this line)
-    let pickedSource = null;
+    var pickedSource = null;       // var: renderLiveBar (via currentShareKind) may run before this line
     async function selectSource(src) {
         pickedSource = src;
         document.querySelectorAll('#sharePicker button.tile').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === src.id)));
@@ -1985,11 +2018,17 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             return [h, grid];
         };
-        box.replaceChildren(...group('Screens', displays), ...group('Windows (only that window is shown and controlled)', list.filter((x) => x.type === 'window')));
-        box.hidden = list.length === 0;
-        const keep = pickedSource && list.find((x) => x.id === pickedSource.id);
-        const first = keep || displays.find((d) => d.primary) || displays[0] || list[0];
+        const win = shareMode() === 'window';
+        const windows = list.filter((x) => x.type === 'window');
+        // Window mode lists windows only and selects NOTHING by itself: a window is shared only after the Client clicks it
+        // (the desktop app would otherwise fall back to the main screen). Screen mode lists screens only.
+        box.replaceChildren(...(win ? group('Pick the window to share', windows) : group('Pick the screen to share', displays)));
+        box.hidden = (win ? windows : displays).length === 0;
+        const keep = pickedSource && list.find((x) => x.id === pickedSource.id && x.type === (win ? 'window' : 'screen'));
+        if (!keep) pickedSource = null;
+        const first = keep || (win ? null : (displays.find((d) => d.primary) || displays[0]));
         if (first) await selectSource(first);
+        else if ($('sharePickerNote')) $('sharePickerNote').textContent = win ? (windows.length ? 'Click a window above. Nothing is shared until you do.' : 'No windows found. Open the app the vendor should work in, then press Share again.') : '';
         renderLiveBar();
         return list;
     }
@@ -2005,15 +2044,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     async function shareNow() {
         if (!STATE.live) return toast('There is no active session to share.', true);
+        // Window mode in the desktop app: a window must be clicked first (privacy: never fall back to the whole screen)
+        if (desktopApi && shareMode() === 'window' && !(pickedSource && pickedSource.type === 'window')) {
+            $('shareError').textContent = 'Click the window you want to share first. Nothing has been shared.';
+            $('shareError').classList.remove('hidden');
+            return;
+        }
         // Already sharing ("Change what I share"): swap the picture on the live connection, no reconnect
         const cur = ScopeDeskRTC.current();
         if (cur.role === 'host' && cur.taskId === STATE.live.taskId) {
-            try { await ScopeDeskRTC.switchScreen(); $('shareModal').classList.remove('open'); toast(pickedSource && pickedSource.type === 'window' ? 'Now sharing one window.' : 'Now sharing the screen you chose.'); }
+            try { await ScopeDeskRTC.switchScreen(); $('shareModal').classList.remove('open'); STATE.shareKind = shareMode(); toast(shareMode() === 'window' ? 'Now sharing one window only.' : 'Now sharing your entire screen.'); }
             catch (err) { $('shareError').textContent = `Could not change what is shared: ${err.message}`; $('shareError').classList.remove('hidden'); }
             return;
         }
         try {
             await ScopeDeskRTC.startHost(STATE.live.taskId);
+            STATE.shareKind = shareMode();
             $('shareModal').classList.remove('open');
             // Pressing "Share my screen" in this dialog IS the Client's approval of the vendor, the task, control of mouse and keyboard
             // and the time window (the dialog lists all of them). Remote control starts now, once, and never by itself afterwards.
@@ -2024,9 +2070,27 @@ document.addEventListener('DOMContentLoaded', () => {
             $('shareModal').classList.add('open');
         }
     }
+    // What is REALLY being shared right now: from the capture itself when the engine reports it, else from the desktop picker
+    function currentShareKind() {
+        const v = STATE.rtcView || {};
+        if (!['waiting', 'connecting', 'live', 'lost'].includes(v.conn)) return null;
+        if (v.shareSurface === 'monitor') return 'screen';
+        if (v.shareSurface === 'window' || v.shareSurface === 'browser') return 'window';
+        if (pickedSource) return pickedSource.type === 'window' ? 'window' : 'screen';
+        return STATE.shareKind || v.shareMode || null;
+    }
+    // Opens the share dialog: to start sharing, or (while sharing) to change what is shared / switch the mode
+    function openShareDialog() {
+        if (!STATE.live) return toast('There is no live session yet. When a vendor accepts your ticket, you can share from here.', true);
+        syncShareHelp(); loadSources();
+        fillShareScope(STATE.live.taskId, null, STATE.live.durationMinutes);
+        $('shareError').classList.add('hidden');
+        $('shareProcess').textContent = STATE.live.process; $('shareVendor').textContent = STATE.live.vendor;
+        $('shareModal').classList.add('open');
+    }
     $('btnConfirmShare').addEventListener('click', shareNow);
     if ($('btnSwitchScreen')) $('btnSwitchScreen').addEventListener('click', () => { syncShareHelp(); loadSources(); $('shareError').classList.add('hidden'); $('shareModal').classList.add('open'); });
-    $('btnShareScreen').addEventListener('click', () => { syncShareHelp(); loadSources(); fillShareScope(STATE.live.taskId, null, STATE.live.durationMinutes); $('shareError').classList.add('hidden'); $('shareProcess').textContent = STATE.live.process; $('shareVendor').textContent = STATE.live.vendor; $('shareModal').classList.add('open'); });
+    $('btnShareScreen').addEventListener('click', openShareDialog);
     $('btnLiveTerminate').addEventListener('click', () => { if (STATE.live && confirm('End the session now? The vendor is disconnected immediately.')) terminateTask(STATE.live.taskId); });
 
     $('btnEnableAlerts').addEventListener('click', async () => {
