@@ -10,6 +10,8 @@
   let running = false;
   let history = [];          // the conversation, in memory only (never stored in the browser)
   let sending = false;
+  const listeners = [];          // workspace.js: top-bar plan badge + Settings & Billing page
+  const notify = () => listeners.forEach((fn) => { try { fn(status); } catch (_) { /* a listener must not break plans */ } });
 
   const PLAN_NAME = { trial: 'Free trial', free: 'Free', member: 'Member', legacy: 'All features' };
   const inr = (v) => Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -18,6 +20,7 @@
 
   // ---------- plan card + dialog ----------
   function render() {
+    notify();
     if (!status) return;
     const s = status;
     $('planCard').classList.toggle('hidden', !running);
@@ -49,7 +52,7 @@
         const save = Math.round(monthly * 12 - m.priceInr);
         if (save > 0) { const tag = document.createElement('span'); tag.className = 'plan-save'; tag.textContent = `save ₹${inr(save)}`; b.append(' ', tag); }
       }
-      b.addEventListener('click', () => buy(m.plan, b));
+      b.addEventListener('click', () => buy(m.plan));
       box.appendChild(b);
     });
     renderChatAccess();
@@ -64,9 +67,9 @@
   function openPlans() { refresh(); $('planModal').classList.add('open'); }
   function closePlans() { $('planModal').classList.remove('open'); }
 
-  async function buy(plan, button) {
+  async function buy(plan) {
     if (!deps) return;
-    const all = [...document.querySelectorAll('.plan-buy-btn')];
+    const all = [...document.querySelectorAll('.plan-buy-btn, .tier-buy')];
     all.forEach((b) => { b.disabled = true; });
     try {
       const res = await deps.api('/api/membership/checkout', { method: 'POST', body: { plan } });
@@ -301,9 +304,12 @@
     stop() {
       running = false; status = null; history = []; lastQuestion = '';
       $('planCard').classList.add('hidden'); $('chatLauncher').classList.add('hidden'); $('chatPanel').classList.add('hidden');
-      $('chatLog').replaceChildren(); closePlans();
+      $('chatLog').replaceChildren(); closePlans(); notify();
     },
     refresh,
-    open: openPlans
+    open: openPlans,
+    buy,
+    getStatus: () => status,
+    onChange(fn) { listeners.push(fn); if (status) fn(status); }
   };
 })();

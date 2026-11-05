@@ -55,7 +55,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const BUILD = '2026-11-05-v13'; // shown on the page so you can tell which version you are looking at
+const BUILD = '2026-11-05-v14'; // shown on the page so you can tell which version you are looking at
 const APP_URL = (process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`)).replace(/\/+$/, '');
 if (IS_PRODUCTION) app.set('trust proxy', 1); // behind Railway's proxy: real client IPs for rate limits
 
@@ -1646,6 +1646,61 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   emitToUser(session.client_id, 'session-ended', payload);
   if (session.vendor_id) emitToUser(session.vendor_id, 'session-ended', payload);
   res.json({ success: true, message: 'Session marked as completed successfully.' });
+});
+
+// ================= BOARDS (personal kanban) =================
+// Every user has their own board. Cards are only ever read or changed by their owner (user_id from the login, never from the body).
+const BOARD_STATUSES = ['todo', 'doing', 'done'];
+const BOARD_PRIORITIES = ['low', 'normal', 'high'];
+const BOARD_MAX_ITEMS = 300;
+const cleanText = (v, max) => String(v == null ? '' : v).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').replace(/[ \t]+/g, ' ').trim().slice(0, max);
+const boardRow = (r) => ({ id: r.id, title: r.title, notes: r.notes, status: r.status, priority: r.priority, position: r.position, taskId: r.task_id, createdAt: r.created_at, updatedAt: r.updated_at });
+
+app.get('/api/board', authenticateToken, async (req, res) => {
+  const rows = await db.all('SELECT * FROM board_items WHERE user_id = ? ORDER BY status, position, id LIMIT ?', [req.user.userId, BOARD_MAX_ITEMS]);
+  res.json({ items: rows.map(boardRow) });
+});
+
+app.post('/api/board', authenticateToken, async (req, res) => {
+  const b = req.body || {};
+  const title = cleanText(b.title, 140);
+  if (title.length < 1) return res.status(400).json({ error: 'Give the card a title.' });
+  const status = BOARD_STATUSES.includes(b.status) ? b.status : 'todo';
+  const priority = BOARD_PRIORITIES.includes(b.priority) ? b.priority : 'normal';
+  const count = await db.get('SELECT COUNT(*) AS n FROM board_items WHERE user_id = ?', [req.user.userId]);
+  if (count.n >= BOARD_MAX_ITEMS) return res.status(400).json({ error: `A board can hold ${BOARD_MAX_ITEMS} cards. Delete some finished ones first.` });
+  // A card may point at one of the user's own tickets (never someone else's)
+  let taskId = null;
+  if (b.taskId != null && Number.isInteger(Number(b.taskId))) {
+    const t = await db.get('SELECT id FROM tasks WHERE id = ? AND (client_id = ? OR assigned_vendor_user_id = ?)', [Number(b.taskId), req.user.userId, req.user.userId]);
+    if (t) taskId = t.id;
+  }
+  const top = await db.get('SELECT MIN(position) AS p FROM board_items WHERE user_id = ? AND status = ?', [req.user.userId, status]);
+  const position = top && top.p != null ? top.p - 1 : 0;       // new cards go on top of their column
+  const r = await db.run('INSERT INTO board_items (user_id, title, notes, status, priority, position, task_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [req.user.userId, title, cleanText(b.notes, 1000), status, priority, position, taskId]);
+  res.status(201).json({ item: boardRow(await db.get('SELECT * FROM board_items WHERE id = ?', [r.lastInsertRowid])) });
+});
+
+app.patch('/api/board/:id', authenticateToken, async (req, res) => {
+  const item = await db.get('SELECT * FROM board_items WHERE id = ? AND user_id = ?', [Number(req.params.id), req.user.userId]);
+  if (!item) return res.status(404).json({ error: 'Card not found.' });
+  const b = req.body || {};
+  const next = { title: item.title, notes: item.notes, status: item.status, priority: item.priority, position: item.position };
+  if (b.title !== undefined) { const t = cleanText(b.title, 140); if (!t) return res.status(400).json({ error: 'Give the card a title.' }); next.title = t; }
+  if (b.notes !== undefined) next.notes = cleanText(b.notes, 1000);
+  if (b.status !== undefined) { if (!BOARD_STATUSES.includes(b.status)) return res.status(400).json({ error: 'Unknown column.' }); next.status = b.status; }
+  if (b.priority !== undefined) { if (!BOARD_PRIORITIES.includes(b.priority)) return res.status(400).json({ error: 'Unknown priority.' }); next.priority = b.priority; }
+  if (b.position !== undefined) { const p = Number(b.position); if (!Number.isFinite(p)) return res.status(400).json({ error: 'Invalid position.' }); next.position = p; }
+  await db.run("UPDATE board_items SET title = ?, notes = ?, status = ?, priority = ?, position = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?",
+    [next.title, next.notes, next.status, next.priority, next.position, item.id, req.user.userId]);
+  res.json({ item: boardRow(await db.get('SELECT * FROM board_items WHERE id = ?', [item.id])) });
+});
+
+app.delete('/api/board/:id', authenticateToken, async (req, res) => {
+  const r = await db.run('DELETE FROM board_items WHERE id = ? AND user_id = ?', [Number(req.params.id), req.user.userId]);
+  if (!r.changes) return res.status(404).json({ error: 'Card not found.' });
+  res.json({ success: true });
 });
 
 // ================= WEBRTC CONFIG + HOST AGENT PAIRING =================

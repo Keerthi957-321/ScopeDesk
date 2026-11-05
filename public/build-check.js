@@ -1,6 +1,6 @@
 // Shows which version of ScopeDesk this page is, bottom-right. If this stamp is missing, or red, old files are being served.
 (function () {
-  var EXPECTED = '2026-11-05-v13';
+  var EXPECTED = '2026-11-05-v14';
   function stamp(text, bad) {
     var d = document.createElement('div');
     d.id = 'buildStamp';

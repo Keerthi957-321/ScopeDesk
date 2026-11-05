@@ -138,7 +138,7 @@ test('assistant provider: a Gemini key uses the free Gemini endpoint; Gemini win
   assert.match(seen[0].url, /generativelanguage\.googleapis\.com/);
   assert.equal(seen[0].auth, 'Bearer AIzaTEST');
   assert.equal(seen[0].body.model, 'gemini-2.5-flash');
-  assert.equal(seen[0].body.max_tokens, 600);
+  assert.equal(seen[0].body.max_tokens, 800);
   const o = createAssistant({ env: { OPENAI_API_KEY: 'sk-x' }, fetchImpl: f, log: quiet });
   assert.equal(o.provider, 'openai');
   await o.reply([{ role: 'user', content: 'hi' }]);
@@ -159,4 +159,28 @@ test('assistant errors: a rejected key, an unknown model and a used-up quota eac
   assert.equal(await run(429, 'You exceeded your current quota'), 'AI_QUOTA');
   assert.equal(await run(429, 'Resource exhausted, retry'), 'AI_BUSY');
   assert.equal(await run(500, 'boom'), 'AI_ERROR');
+});
+
+test('assistant: when the model is refused (404) it lists the key\'s models, picks a current flash model and retries', async () => {
+  const { createAssistant } = require('../server/assistant');
+  const posts = [];
+  const f = async (url, opts) => {
+    if (opts.method === 'GET') {
+      return { ok: true, status: 200, json: async () => ({ data: [
+        { id: 'models/gemini-3.8-flash' }, { id: 'models/gemini-3.8-flash-image' }, { id: 'models/gemini-3.5-flash-lite' },
+        { id: 'models/gemini-4-argon-preview' }, { id: 'models/gemini-embedding-2' }, { id: 'models/gemini-3.8-flash-live' }, { id: 'models/gemma-4' }
+      ] }) };
+    }
+    const body = JSON.parse(opts.body);
+    posts.push(body.model);
+    if (body.model === 'gemini-2.5-flash') return { ok: false, status: 404, json: async () => [{ error: { message: 'models/gemini-2.5-flash is not found' } }] };
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: `answer from ${body.model}` } }] }) };
+  };
+  const a = createAssistant({ env: { GEMINI_API_KEY: 'AQ.test' }, fetchImpl: f, log: quiet });
+  assert.equal(await a.reply([{ role: 'user', content: 'hi' }]), 'answer from gemini-3.8-flash');
+  assert.deepEqual(posts, ['gemini-2.5-flash', 'gemini-3.8-flash']);
+  assert.equal(a.model, 'gemini-3.8-flash');
+  assert.equal(await a.reply([{ role: 'user', content: 'again' }]), 'answer from gemini-3.8-flash');   // remembered, no second lookup
+  assert.equal(posts.length, 3);
+  assert.equal(a.pickModel(['models/gemini-3.5-flash-lite', 'models/gemini-3.1-flash-lite']).best, 'gemini-3.5-flash-lite');
 });

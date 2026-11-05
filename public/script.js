@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-11-05-v13';
+window.SCOPEDESK_BUILD = '2026-11-05-v14';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -677,6 +677,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function logout(message) {
         try { ScopeDeskPlans.stop(); } catch (_) { /* not loaded */ }
+        try { ScopeDeskWorkspace.stop(); } catch (_) { /* not loaded */ }
         clearLive();
         teardownRemoteConnection();
         if (STATE.socket) { STATE.socket.disconnect(); STATE.socket = null; }
@@ -708,8 +709,12 @@ document.addEventListener('DOMContentLoaded', () => {
         $('navSessionLink').classList.add('hidden'); // shown for the vendor only while a session is live (syncVendorNav)
 
         document.querySelectorAll('.profile-name').forEach((el) => { el.textContent = STATE.user.username; });
-        routeToPanel(isClient ? 'clientDashboardPanel' : 'vendorDashboardPanel');
         $('navOverviewLink').setAttribute('data-target', isClient ? 'clientDashboardPanel' : 'vendorDashboardPanel');
+        $('navOverviewText').textContent = isClient ? 'Tickets' : 'My Tasks';
+        // Land on the Command Center; a page you were on before a reload (Boards, Analytics...) is reopened
+        const WORKSPACE_PAGES = ['commandCenterPanel', 'boardsPanel', 'analyticsPanel', 'settingsPanel'];
+        routeToPanel(WORKSPACE_PAGES.includes(lastPanel) ? lastPanel : 'commandCenterPanel');
+        ScopeDeskWorkspace.start();
 
         connectSocket();
         loadTasks().then(() => restoreVendorSession(lastPanel));
@@ -725,8 +730,11 @@ document.addEventListener('DOMContentLoaded', () => {
         navItems.forEach((item) => {
             const target = item.getAttribute('data-target');
             const isOverview = item.id === 'navOverviewLink' && (panelId === 'clientDashboardPanel' || panelId === 'vendorDashboardPanel');
-            item.classList.toggle('active', target === panelId || isOverview);
+            const isSession = item.id === 'navSessionLink' && panelId === 'sessionMonitorPanel';
+            item.classList.toggle('active', target === panelId || isOverview || isSession);
+            if (target === panelId || isOverview || isSession) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
         });
+        try { ScopeDeskWorkspace.onRoute(panelId); } catch (_) { /* workspace module not loaded */ }
     }
 
     navItems.forEach((item) => {
@@ -738,6 +746,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     return toast('No active session. Enter a token from your client to start one.');
                 }
                 routeToPanel('sessionMonitorPanel');
+            } else if (target && target !== 'overview-panel' && $(target) && $(target).classList.contains('pane-view')) {
+                routeToPanel(target);     // Command Center, Boards, Analytics, Settings & Billing (and the dashboards themselves)
             } else {
                 routeToPanel(STATE.user.role === 'client' ? 'clientDashboardPanel' : 'vendorDashboardPanel');
             }
@@ -1013,6 +1023,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (data.serverTime) STATE.clockOffset = data.serverTime - Date.now();
             renderTasks();
             if (STATE.user.role === 'client') syncClientLive();
+            try { ScopeDeskWorkspace.onTasks(); } catch (_) { /* workspace module not loaded */ }
         } catch (err) {
             if (err.message !== 'Session expired.') toast(err.message, true);
         }
@@ -1361,6 +1372,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     ScopeDeskPlans.init({ api, toast, loadRazorpay });
+    // Command Center, Boards, Analytics, Settings & Billing and the Ctrl/Cmd+K palette (workspace.js). It reads STATE, never writes it.
+    ScopeDeskWorkspace.init({
+        api, toast,
+        getUser: () => STATE.user,
+        getTasks: () => STATE.tasks || [],
+        getLive: () => STATE.live,
+        route: (panel) => routeToPanel(panel === 'overview-panel' ? (STATE.user && STATE.user.role === 'client' ? 'clientDashboardPanel' : 'vendorDashboardPanel') : panel),
+        openNewTask: () => $('btnOpenTaskModal').click(),
+        openAssistant: () => { const l = $('chatLauncher'); if (l && !l.classList.contains('hidden') && $('chatPanel').classList.contains('hidden')) l.click(); },
+        openSession: () => $('navSessionLink').click(),
+        logout: () => logout()
+    });
 
     function showIssuedToken(task) {
         taskModal.classList.remove('open');

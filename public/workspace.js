@@ -1,0 +1,818 @@
+// ScopeDesk workspace pages: Command Center, Boards, Analytics, Settings & Billing, the top bar and the Ctrl/Cmd+K palette.
+// Reads the app's state through the functions script.js passes to init(); it never changes tickets or sessions itself.
+// Everything that comes from the server is written with textContent / DOM nodes, never as HTML.
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const SVG = 'http://www.w3.org/2000/svg';
+  let deps = null;
+  let running = false;
+  let alerts = [];                  // client only: security events (GET /api/alerts)
+  let board = [];                   // GET /api/board
+  let boardLoaded = false;
+  let boardView = 'kanban';
+  let rangeDays = 30;
+  let plan = null;                  // from ScopeDeskPlans
+  let currentPanel = '';
+
+  // ---------- THEME (light / dark / match the computer) ----------
+  // The choice is a per-device preference, so it lives in localStorage (guarded: it can be blocked). index.html applies it before
+  // the first paint; this keeps it in sync, follows the computer when "system" is chosen, and drives every toggle on the page.
+  const THEME_KEY = 'scopedesk_theme';
+  const sysLight = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+  function themePref() { try { const v = localStorage.getItem(THEME_KEY); return v === 'light' || v === 'dark' ? v : 'system'; } catch (_) { return 'system'; } }
+  const resolveTheme = (pref) => (pref === 'light' || pref === 'dark' ? pref : (sysLight && sysLight.matches ? 'light' : 'dark'));
+  function applyTheme(pref, animate) {
+    const root = document.documentElement;
+    const theme = resolveTheme(pref);
+    if (animate) { root.classList.add('theme-switching'); clearTimeout(applyTheme.t); applyTheme.t = setTimeout(() => root.classList.remove('theme-switching'), 350); }
+    root.setAttribute('data-theme', theme);
+    document.querySelectorAll('[data-theme-toggle]').forEach((b) => {
+      const label = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+      b.setAttribute('aria-label', label); b.title = label;
+    });
+    document.querySelectorAll('[data-theme-choice]').forEach((c) => c.setAttribute('aria-checked', String(c.dataset.themeChoice === pref)));
+  }
+  function setTheme(pref) {
+    try { if (pref === 'system') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, pref); } catch (_) { /* remembered for this page only */ }
+    currentThemePref = pref;
+    applyTheme(pref, true);
+  }
+  let currentThemePref = themePref();
+  applyTheme(currentThemePref, false);
+  if (sysLight) {
+    const follow = () => { if (currentThemePref === 'system') applyTheme('system', true); };
+    if (sysLight.addEventListener) sysLight.addEventListener('change', follow); else if (sysLight.addListener) sysLight.addListener(follow);
+  }
+  // The quick toggle flips between light and dark (an explicit choice); "Match my computer" is in Settings > Appearance
+  document.querySelectorAll('[data-theme-toggle]').forEach((b) => b.addEventListener('click', () => setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark')));
+  document.querySelectorAll('[data-theme-choice]').forEach((c) => c.addEventListener('click', () => setTheme(c.dataset.themeChoice)));
+  // keyboard: arrows move between the three theme cards (radio group)
+  const picker = document.getElementById('themePicker');
+  if (picker) picker.addEventListener('keydown', (e) => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+    e.preventDefault();
+    const cards = [...picker.querySelectorAll('[data-theme-choice]')];
+    const i = cards.indexOf(document.activeElement);
+    const next = cards[(i + (e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? cards.length - 1 : 1)) % cards.length];
+    next.focus(); setTheme(next.dataset.themeChoice);
+  });
+
+  // ---------- tiny DOM helpers ----------
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v == null || v === false) continue;
+        if (k === 'class') el.className = v;
+        else if (k === 'text') el.textContent = v;
+        else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+        else if (k === 'dataset') Object.assign(el.dataset, v);
+        else el.setAttribute(k, v === true ? '' : v);
+      }
+    }
+    kids.flat().forEach((c) => { if (c == null || c === false) return; el.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c); });
+    return el;
+  }
+  function s(tag, attrs, ...kids) {
+    const el = document.createElementNS(SVG, tag);
+    for (const [k, v] of Object.entries(attrs || {})) if (v != null) el.setAttribute(k, v);
+    kids.flat().forEach((c) => c && el.appendChild(c));
+    return el;
+  }
+  const ICONS = {
+    ticket: 'M3 8a2 2 0 0 0 2-2h14a2 2 0 0 0 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 0-2 2H5a2 2 0 0 0-2-2v-2a2 2 0 0 0 0-4z',
+    live: 'M2 12h4l3-8 4 16 3-8h6',
+    clock: 'M12 7v5l3 2M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z',
+    shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
+    check: 'M20 6L9 17l-5-5',
+    plus: 'M12 5v14M5 12h14',
+    board: 'M3 3h18v18H3zM9 3v18M15 3v18',
+    chart: 'M3 3v18h18M7 15l4-4 3 3 5-6',
+    spark: 'M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z',
+    card: 'M2 6h20v12H2zM2 10h20',
+    monitor: 'M2 3h20v14H2zM8 21h8M12 17v4',
+    grid: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z',
+    settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12h2M3 12h2M12 3v2M12 19v2M17 7l1.4-1.4M5.6 18.4 7 17M17 17l1.4 1.4M5.6 5.6 7 7',
+    trash: 'M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6',
+    alert: 'M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
+    logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9',
+    arrowL: 'M15 18l-6-6 6-6', arrowR: 'M9 18l6-6-6-6',
+    search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM21 21l-4.3-4.3'
+  };
+  const icon = (name, cls = 'ico') => s('svg', { class: cls, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d: ICONS[name] }));
+
+  // ---------- data helpers ----------
+  const DAY = 86400000;
+  const toMs = (v) => { if (!v) return NaN; const str = String(v); return new Date(str.includes('T') || str.endsWith('Z') ? str : str.replace(' ', 'T') + 'Z').getTime(); };
+  const dayKey = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
+  const startOfDay = (ms) => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
+  const isClient = () => { const u = deps && deps.getUser(); return !!u && u.role === 'client'; };
+  const tasks = () => (deps ? deps.getTasks() : []);
+  const listOf = (col) => { try { const v = JSON.parse(col || '[]'); return Array.isArray(v) ? v.map(String) : []; } catch (_) { return []; } };
+  const appsOf = (t) => { const a = listOf(t.allowed_apps); return a.length ? a : (t.target_process ? [t.target_process] : []); };
+  const counterparty = (t) => (isClient() ? (t.session_vendor_name || t.vendor_name || 'Vendor') : (t.client_org || t.client_username || 'Client'));
+  const fmtNum = (n) => Number(n || 0).toLocaleString('en-IN');
+  const fmtMinutes = (m) => (m >= 120 ? `${(m / 60).toFixed(m % 60 ? 1 : 0)} h` : `${m} min`);
+  const timeAgo = (ms) => {
+    const d = Date.now() - ms;
+    if (!Number.isFinite(d)) return '';
+    if (d < 60000) return 'just now';
+    if (d < 3600000) return `${Math.floor(d / 60000)} min ago`;
+    if (d < DAY) return `${Math.floor(d / 3600000)} h ago`;
+    if (d < 7 * DAY) return `${Math.floor(d / DAY)} d ago`;
+    return new Date(ms).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  };
+  const STATUS = {
+    pending: { label: 'Waiting for vendor', tone: 'amber' },
+    active: { label: 'Live', tone: 'green' },
+    completed: { label: 'Completed', tone: 'blue' },
+    terminated: { label: 'Terminated', tone: 'red' },
+    expired: { label: 'Expired', tone: 'slate' }
+  };
+
+  // Counts per day for the last n days (oldest first)
+  function perDay(items, getMs, n, getValue = () => 1) {
+    const today = startOfDay(Date.now());
+    const buckets = Array.from({ length: n }, (_, i) => ({ start: today - (n - 1 - i) * DAY, value: 0 }));
+    const index = new Map(buckets.map((b, i) => [dayKey(b.start), i]));
+    items.forEach((it) => { const ms = getMs(it); const i = index.get(dayKey(ms)); if (i != null) buckets[i].value += getValue(it); });
+    return buckets;
+  }
+
+  // ---------- top bar ----------
+  const TITLES = { commandCenterPanel: 'Command Center', clientDashboardPanel: 'Tickets', vendorDashboardPanel: 'My Tasks', boardsPanel: 'Boards', analyticsPanel: 'Analytics', settingsPanel: 'Settings & Billing', sessionMonitorPanel: 'Remote Desktop' };
+  const PLAN_LABEL = { trial: 'Free trial', free: 'Free', member: 'Member', legacy: 'All features' };
+  function renderTopbar() {
+    const u = deps && deps.getUser();
+    // Vendors have no plan or billing: their page is just "Settings"
+    const setLabel = isClient() ? 'Settings & Billing' : 'Settings';
+    TITLES.settingsPanel = setLabel;
+    const navSpan = $('navSettingsLink') && $('navSettingsLink').querySelector('span');
+    if (navSpan) navSpan.textContent = setLabel;
+    const setTitle = document.querySelector('#settingsPanel .page-title');
+    if (setTitle) setTitle.textContent = setLabel;
+    const setSub = document.querySelector('#settingsPanel .page-sub');
+    if (setSub) setSub.textContent = isClient() ? 'Your account, your plan, and how ScopeDesk protects your computer.' : 'Your account and the rules every session follows.';
+    $('topbarTitle').textContent = TITLES[currentPanel] || 'ScopeDesk';
+    $('topAvatar').textContent = u ? u.username.charAt(0).toUpperCase() : 'U';
+    $('btnTopAssistant').classList.toggle('hidden', !isClient());
+    const pill = $('topPlanPill');
+    pill.classList.toggle('hidden', !isClient() || !plan);
+    if (plan) {
+      pill.className = `plan-pill plan-pill-${plan.plan}${!isClient() ? ' hidden' : ''}`;
+      $('topPlanName').textContent = PLAN_LABEL[plan.plan] || plan.plan;
+      const left = (ms) => Math.max(0, Math.ceil((ms - Date.now()) / DAY));
+      $('topPlanSub').textContent = plan.plan === 'trial' ? `${left(plan.trialEndsAt)}d left`
+        : plan.plan === 'member' ? `until ${new Date(plan.memberUntil).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`
+        : plan.plan === 'free' ? 'Upgrade' : '';
+    }
+    $('cmdkHint').textContent = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘ K' : 'Ctrl K';
+  }
+
+  // ---------- COMMAND CENTER ----------
+  function sparkline(values, tone) {
+    const w = 120, hgt = 34, max = Math.max(1, ...values);
+    const step = values.length > 1 ? w / (values.length - 1) : w;
+    const pts = values.map((v, i) => [i * step, hgt - 3 - (v / max) * (hgt - 8)]);
+    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+    const area = `${line} L${w},${hgt} L0,${hgt} Z`;
+    const id = `sg${Math.random().toString(36).slice(2, 8)}`;
+    return s('svg', { class: `spark spark-${tone}`, viewBox: `0 0 ${w} ${hgt}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' },
+      s('defs', {}, s('linearGradient', { id, x1: '0', x2: '0', y1: '0', y2: '1' }, s('stop', { offset: '0%', class: 'spark-stop-a' }), s('stop', { offset: '100%', class: 'spark-stop-b' }))),
+      s('path', { d: area, fill: `url(#${id})` }),
+      s('path', { d: line, class: 'spark-line', fill: 'none' }),
+      s('circle', { cx: pts[pts.length - 1][0], cy: pts[pts.length - 1][1], r: '2.6', class: 'spark-dot' }));
+  }
+  function kpiCard({ label, value, sub, delta, series, tone, iconName, onClick }) {
+    const card = h(onClick ? 'button' : 'div', { class: `kpi kpi-${tone}`, type: onClick ? 'button' : null, onclick: onClick || null },
+      h('div', { class: 'kpi-top' }, h('span', { class: 'kpi-ico' }, icon(iconName)), h('span', { class: 'kpi-label', text: label })),
+      h('div', { class: 'kpi-value', text: value }),
+      h('div', { class: 'kpi-foot' },
+        delta != null ? h('span', { class: `kpi-delta ${delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat'}`, text: `${delta > 0 ? '+' : ''}${delta}` }) : null,
+        h('span', { class: 'kpi-sub', text: sub || '' })),
+      series ? sparkline(series, tone) : null);
+    return card;
+  }
+
+  function renderCommandCenter() {
+    const u = deps.getUser();
+    if (!u) return;
+    const hour = new Date().getHours();
+    $('ccGreeting').textContent = `${hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'}, ${u.username}`;
+    $('ccEyebrow').textContent = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' });
+    $('ccSub').textContent = isClient() ? 'Your support tickets, live sessions and security events at a glance.' : 'Your assigned tasks and live sessions at a glance.';
+    $('ccNewTask').classList.toggle('hidden', !isClient());
+
+    const all = tasks();
+    const created = (t) => toMs(t.created_at || t.window_start);
+    const days14 = perDay(all, created, 14);
+    const thisWeek = days14.slice(7).reduce((n, b) => n + b.value, 0);
+    const lastWeek = days14.slice(0, 7).reduce((n, b) => n + b.value, 0);
+    const live = all.filter((t) => t.status === 'active').length;
+    const waiting = all.filter((t) => t.status === 'pending').length;
+    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    const minutesSeries = perDay(all, created, 14, (t) => Number(t.duration_minutes) || 0).map((b) => b.value);
+    const monthMinutes = all.filter((t) => created(t) >= monthStart.getTime()).reduce((n, t) => n + (Number(t.duration_minutes) || 0), 0);
+    const kpis = $('ccKpis');
+    kpis.replaceChildren(
+      kpiCard({ label: isClient() ? 'Tickets this week' : 'Assigned this week', value: fmtNum(thisWeek), delta: thisWeek - lastWeek, sub: 'vs last week', series: days14.map((b) => b.value), tone: 'indigo', iconName: 'ticket', onClick: () => deps.route('overview-panel') }),
+      kpiCard({ label: 'Live sessions', value: fmtNum(live), sub: waiting ? `${waiting} waiting for a vendor` : 'nothing waiting', tone: 'green', iconName: 'live', onClick: live ? () => (isClient() ? deps.route('overview-panel') : deps.openSession()) : null }),
+      kpiCard({ label: 'Approved access this month', value: fmtMinutes(monthMinutes), sub: 'total time window', series: minutesSeries, tone: 'cyan', iconName: 'clock', onClick: () => deps.route('analyticsPanel') })
+    );
+    if (isClient()) {
+      const ev14 = perDay(alerts, (a) => toMs(a.occurred_at), 14);
+      const ev30 = alerts.filter((a) => toMs(a.occurred_at) > Date.now() - 30 * DAY).length;
+      kpis.appendChild(kpiCard({ label: 'Security events (30 days)', value: fmtNum(ev30), sub: ev30 ? 'each one ended its session' : 'no breaches', series: ev14.map((b) => b.value), tone: ev30 ? 'red' : 'slate', iconName: 'shield' }));
+    } else {
+      const done30 = all.filter((t) => t.status === 'completed' && created(t) > Date.now() - 30 * DAY).length;
+      kpis.appendChild(kpiCard({ label: 'Completed (30 days)', value: fmtNum(done30), sub: 'finished inside the rules', tone: 'blue', iconName: 'check' }));
+    }
+
+    // Activity feed: ticket events + security events, newest first
+    const events = all.map((t) => ({ ms: created(t), kind: 'ticket', t }))
+      .concat(alerts.map((a) => ({ ms: toMs(a.occurred_at), kind: 'alert', a })))
+      .filter((e) => Number.isFinite(e.ms)).sort((a, b) => b.ms - a.ms).slice(0, 9);
+    const feed = $('ccActivity');
+    feed.replaceChildren();
+    if (!events.length) feed.appendChild(h('li', { class: 'empty-row' }, h('span', { text: isClient() ? 'No activity yet. Create your first support task to get started.' : 'No activity yet. Tasks your clients send you appear here.' })));
+    events.forEach((e) => {
+      if (e.kind === 'alert') {
+        feed.appendChild(h('li', { class: 'act act-red' }, h('span', { class: 'act-ico' }, icon('alert')),
+          h('div', { class: 'act-body' }, h('p', { class: 'act-title' }, h('strong', { text: 'Security event' }), ` on "${e.a.task_title || 'a task'}"`),
+            h('p', { class: 'act-sub', text: e.a.details || e.a.process_name || 'Out-of-scope activity' })),
+          h('time', { class: 'act-time', text: timeAgo(e.ms) })));
+        return;
+      }
+      const st = STATUS[e.t.status] || { label: e.t.status, tone: 'slate' };
+      feed.appendChild(h('li', { class: `act act-${st.tone}` }, h('span', { class: 'act-ico' }, icon('ticket')),
+        h('div', { class: 'act-body' },
+          h('p', { class: 'act-title' }, isClient() ? 'Ticket ' : 'Task ', h('strong', { text: `"${e.t.title}"` }), isClient() ? ` for ${counterparty(e.t)}` : ` from ${counterparty(e.t)}`),
+          h('p', { class: 'act-sub' }, h('span', { class: `chip chip-${st.tone}`, text: st.label }), ` ${e.t.duration_minutes || '-'} min · ${appsOf(e.t).slice(0, 3).join(', ') || 'no apps listed'}`)),
+        h('time', { class: 'act-time', text: timeAgo(e.ms) })));
+    });
+
+    // Right now
+    const now = $('ccNow');
+    now.replaceChildren();
+    const activeTask = all.find((t) => t.status === 'active');
+    if (activeTask) {
+      const end = toMs(activeTask.window_end);
+      now.appendChild(h('div', { class: 'now-live' },
+        h('div', { class: 'now-row' }, h('span', { class: 'pulse', 'aria-hidden': 'true' }), h('strong', { text: 'Live session' }), h('span', { class: 'muted', text: Number.isFinite(end) ? `ends ${new Date(end).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : '' })),
+        h('p', { class: 'now-title', text: activeTask.title }),
+        h('p', { class: 'muted', text: `${isClient() ? 'Vendor' : 'Client'}: ${counterparty(activeTask)}` }),
+        h('button', { type: 'button', class: 'btn-accent small', text: isClient() ? 'Go to the live session' : 'Open Remote Desktop', onclick: () => (isClient() ? deps.route('overview-panel') : deps.openSession()) })));
+    } else {
+      now.appendChild(h('div', { class: 'now-idle' }, h('span', { class: 'idle-dot', 'aria-hidden': 'true' }),
+        h('div', {}, h('strong', { text: 'No live session' }), h('p', { class: 'muted', text: waiting ? `${waiting} ticket${waiting > 1 ? 's are' : ' is'} waiting for a vendor to connect.` : 'Nobody has remote access to this workspace right now.' }))));
+    }
+
+    const quick = $('ccQuick');
+    quick.replaceChildren();
+    const qa = (label, iconName, fn) => h('button', { type: 'button', class: 'qa', onclick: fn }, h('span', { class: 'qa-ico' }, icon(iconName)), h('span', { text: label }));
+    if (isClient()) quick.appendChild(qa('New support task', 'plus', deps.openNewTask));
+    quick.appendChild(qa('Open board', 'board', () => deps.route('boardsPanel')));
+    if (isClient()) quick.appendChild(qa('Ask the AI assistant', 'spark', deps.openAssistant));
+    quick.appendChild(qa('View analytics', 'chart', () => deps.route('analyticsPanel')));
+    if (isClient()) quick.appendChild(qa('Plans & billing', 'card', () => deps.route('settingsPanel')));
+  }
+
+  // ---------- BOARDS ----------
+  const COLUMNS = [{ key: 'todo', label: 'To do' }, { key: 'doing', label: 'In progress' }, { key: 'done', label: 'Done' }];
+  const PRIORITY = { high: 'High', normal: 'Normal', low: 'Low' };
+  async function loadBoard() {
+    try { board = (await deps.api('/api/board')).items || []; boardLoaded = true; } catch (err) { deps.toast(err.message, true); }
+    renderBoard();
+  }
+  const sorted = (status) => board.filter((c) => c.status === status).sort((a, b) => a.position - b.position || a.id - b.id);
+
+  async function patchCard(card, changes) {
+    const before = { ...card };
+    Object.assign(card, changes);                      // optimistic: the board moves at once
+    renderBoard();
+    try {
+      const res = await deps.api(`/api/board/${card.id}`, { method: 'PATCH', body: changes });
+      Object.assign(card, res.item);
+    } catch (err) {
+      Object.assign(card, before);
+      deps.toast(err.message, true);
+    }
+    renderBoard();
+    if (currentPanel === 'commandCenterPanel') renderCommandCenter();
+  }
+  async function deleteCard(card) {
+    const i = board.indexOf(card);
+    board.splice(i, 1);
+    renderBoard();
+    try { await deps.api(`/api/board/${card.id}`, { method: 'DELETE' }); }
+    catch (err) { board.splice(i, 0, card); renderBoard(); deps.toast(err.message, true); }
+  }
+  // New position for a card dropped at `index` in a column (between its neighbours)
+  function positionAt(status, index, movingId) {
+    const list = sorted(status).filter((c) => c.id !== movingId);
+    const prev = list[index - 1], next = list[index];
+    if (!prev && !next) return 0;
+    if (!prev) return next.position - 1;
+    if (!next) return prev.position + 1;
+    return (prev.position + next.position) / 2;
+  }
+  function moveBy(card, dir) {
+    const i = COLUMNS.findIndex((c) => c.key === card.status);
+    const to = COLUMNS[i + dir];
+    if (to) patchCard(card, { status: to.key, position: positionAt(to.key, 0, card.id) });
+  }
+
+  function cardTitle(card) {
+    const title = h('span', { class: 'card-title', text: card.title, tabindex: '0', title: 'Double-click (or press Enter) to rename' });
+    const edit = () => {
+      const input = h('input', { class: 'card-edit', value: card.title, maxlength: '140', 'aria-label': 'Card title' });
+      const done = (save) => {
+        const v = input.value.trim();
+        if (save && v && v !== card.title) patchCard(card, { title: v }); else renderBoard();
+      };
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
+      input.addEventListener('blur', () => done(true));
+      title.replaceWith(input);
+      input.focus(); input.select();
+    };
+    title.addEventListener('dblclick', edit);
+    title.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); edit(); } });
+    return title;
+  }
+
+  function cardEl(card) {
+    const done = card.status === 'done';
+    const colIndex = COLUMNS.findIndex((c) => c.key === card.status);
+    const el = h('article', { class: `kcard${done ? ' is-done' : ''}`, draggable: 'true', dataset: { id: String(card.id) } },
+      h('div', { class: 'kcard-top' },
+        h('label', { class: 'check', title: done ? 'Mark as not done' : 'Mark as done' },
+          h('input', { type: 'checkbox', checked: done, 'aria-label': `Done: ${card.title}`, onchange: (e) => patchCard(card, { status: e.target.checked ? 'done' : 'todo', position: positionAt(e.target.checked ? 'done' : 'todo', 0, card.id) }) }),
+          h('span', { class: 'check-box', 'aria-hidden': 'true' }, icon('check'))),
+        cardTitle(card)),
+      h('div', { class: 'kcard-foot' },
+        h('span', { class: `prio prio-${card.priority}`, text: PRIORITY[card.priority] || card.priority }),
+        h('span', { class: 'kcard-time', text: timeAgo(toMs(card.updatedAt)) }),
+        h('span', { class: 'kcard-tools' },
+          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Move left', disabled: colIndex === 0, onclick: () => moveBy(card, -1) }, icon('arrowL')),
+          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Move right', disabled: colIndex === COLUMNS.length - 1, onclick: () => moveBy(card, 1) }, icon('arrowR')),
+          h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `Delete ${card.title}`, onclick: () => deleteCard(card) }, icon('trash')))));
+    el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', String(card.id)); e.dataTransfer.effectAllowed = 'move'; requestAnimationFrame(() => el.classList.add('dragging')); });
+    el.addEventListener('dragend', () => { el.classList.remove('dragging'); document.querySelectorAll('.kcol.drop').forEach((c) => c.classList.remove('drop')); document.querySelectorAll('.drop-mark').forEach((m) => m.remove()); });
+    return el;
+  }
+
+  function dropIndex(list, y) {
+    const cards = [...list.querySelectorAll('.kcard:not(.dragging)')];
+    const i = cards.findIndex((c) => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; });
+    return i === -1 ? cards.length : i;
+  }
+
+  function renderBoard() {
+    if (!deps) return;
+    const kan = $('boardKanban'), list = $('boardList');
+    kan.classList.toggle('hidden', boardView !== 'kanban');
+    list.classList.toggle('hidden', boardView !== 'list');
+    if (!boardLoaded) { kan.replaceChildren(h('p', { class: 'muted', text: 'Loading your board...' })); return; }
+
+    kan.replaceChildren(...COLUMNS.map((col) => {
+      const cards = sorted(col.key);
+      const body = h('div', { class: 'kcol-body' }, cards.length ? cards.map(cardEl) : h('p', { class: 'kcol-empty', text: col.key === 'done' ? 'Finished cards land here.' : 'Drop cards here.' }));
+      const column = h('section', { class: `kcol kcol-${col.key}`, 'aria-label': col.label },
+        h('header', { class: 'kcol-head' }, h('span', { class: 'kcol-dot', 'aria-hidden': 'true' }), h('h3', { text: col.label }), h('span', { class: 'kcol-count', text: String(cards.length) })),
+        body);
+      column.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        column.classList.add('drop');
+        const idx = dropIndex(body, e.clientY);
+        let mark = body.querySelector('.drop-mark');
+        if (!mark) mark = h('div', { class: 'drop-mark', 'aria-hidden': 'true' });
+        const cardsNow = [...body.querySelectorAll('.kcard:not(.dragging)')];
+        if (cardsNow[idx]) body.insertBefore(mark, cardsNow[idx]); else body.appendChild(mark);
+      });
+      column.addEventListener('dragleave', (e) => { if (!column.contains(e.relatedTarget)) { column.classList.remove('drop'); const m = body.querySelector('.drop-mark'); if (m) m.remove(); } });
+      column.addEventListener('drop', (e) => {
+        e.preventDefault();
+        column.classList.remove('drop');
+        const m = body.querySelector('.drop-mark'); if (m) m.remove();
+        const card = board.find((c) => String(c.id) === e.dataTransfer.getData('text/plain'));
+        if (!card) return;
+        const idx = dropIndex(body, e.clientY);
+        patchCard(card, { status: col.key, position: positionAt(col.key, idx, card.id) });
+      });
+      return column;
+    }));
+
+    const all = COLUMNS.flatMap((c) => sorted(c.key));
+    list.replaceChildren(all.length ? h('table', { class: 'dtable' },
+      h('thead', {}, h('tr', {}, h('th', { text: '' }), h('th', { text: 'Card' }), h('th', { text: 'Status' }), h('th', { text: 'Priority' }), h('th', { text: 'Updated' }), h('th', { text: '' }))),
+      h('tbody', {}, all.map((card) => h('tr', { class: card.status === 'done' ? 'is-done' : '' },
+        h('td', {}, h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: card.status === 'done', 'aria-label': `Done: ${card.title}`, onchange: (e) => patchCard(card, { status: e.target.checked ? 'done' : 'todo' }) }), h('span', { class: 'check-box', 'aria-hidden': 'true' }, icon('check')))),
+        h('td', { class: 'td-title' }, cardTitle(card)),
+        h('td', {}, h('select', { class: 'mini-select', 'aria-label': 'Status', onchange: (e) => patchCard(card, { status: e.target.value, position: positionAt(e.target.value, 0, card.id) }) },
+          COLUMNS.map((c) => h('option', { value: c.key, selected: c.key === card.status, text: c.label })))),
+        h('td', {}, h('select', { class: 'mini-select', 'aria-label': 'Priority', onchange: (e) => patchCard(card, { priority: e.target.value }) },
+          Object.entries(PRIORITY).map(([k, v]) => h('option', { value: k, selected: k === card.priority, text: v })))),
+        h('td', { class: 'muted', text: timeAgo(toMs(card.updatedAt)) }),
+        h('td', {}, h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `Delete ${card.title}`, onclick: () => deleteCard(card) }, icon('trash'))))))
+    ) : h('p', { class: 'muted pad', text: 'No cards yet. Add one above.' }));
+  }
+
+  // ---------- ANALYTICS ----------
+  function chartTooltip(container) {
+    let tip = container.querySelector('.chart-tip');
+    if (!tip) { tip = h('div', { class: 'chart-tip', role: 'status' }); container.appendChild(tip); }
+    return {
+      show(text, x, y) { tip.textContent = text; tip.style.left = `${x}px`; tip.style.top = `${y}px`; tip.classList.add('on'); },
+      hide() { tip.classList.remove('on'); }
+    };
+  }
+  function barChart(container, buckets, labelFor) {
+    const W = 640, H = 220, padL = 28, padB = 22, padT = 10;
+    const max = Math.max(1, ...buckets.map((b) => b.value));
+    const step = (W - padL) / buckets.length;
+    const bw = Math.max(3, Math.min(26, step * 0.62));
+    const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, class: 'chart-svg', role: 'img', 'aria-label': 'Bar chart' });
+    const ticks = [0, Math.ceil(max / 2), max];
+    ticks.forEach((t) => {
+      const y = H - padB - (t / max) * (H - padB - padT);
+      svg.appendChild(s('line', { x1: padL, x2: W, y1: y, y2: y, class: 'grid-line' }));
+      const tx = s('text', { x: padL - 8, y: y + 4, class: 'axis-text', 'text-anchor': 'end' }); tx.textContent = String(t); svg.appendChild(tx);
+    });
+    const tip = chartTooltip(container);
+    const every = Math.ceil(buckets.length / 8);
+    buckets.forEach((b, i) => {
+      const x = padL + i * step + (step - bw) / 2;
+      const bh = (b.value / max) * (H - padB - padT);
+      const rect = s('rect', { x, y: H - padB - bh, width: bw, height: Math.max(bh, b.value ? 2 : 0), rx: '3', class: 'bar' });
+      const hit = s('rect', { x: padL + i * step, y: padT, width: step, height: H - padB - padT, class: 'hit', tabindex: '0', 'aria-label': `${labelFor(b)}: ${b.value}` });
+      const show = () => { rect.classList.add('on'); const r = hit.getBoundingClientRect(), c = container.getBoundingClientRect(); tip.show(`${labelFor(b)} · ${b.value} ticket${b.value === 1 ? '' : 's'}`, r.left - c.left + r.width / 2, r.top - c.top + (H - padB - bh) / H * r.height - 8); };
+      const hide = () => { rect.classList.remove('on'); tip.hide(); };
+      hit.addEventListener('mouseenter', show); hit.addEventListener('focus', show);
+      hit.addEventListener('mouseleave', hide); hit.addEventListener('blur', hide);
+      svg.appendChild(rect); svg.appendChild(hit);
+      if (i % every === 0) { const tx = s('text', { x: padL + i * step + step / 2, y: H - 6, class: 'axis-text', 'text-anchor': 'middle' }); tx.textContent = new Date(b.start).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }); svg.appendChild(tx); }
+    });
+    container.replaceChildren(svg, container.querySelector('.chart-tip') || h('div', { class: 'chart-tip' }));
+  }
+  function lineChart(container, points) {
+    const W = 640, H = 200, padL = 40, padB = 22, padT = 12;
+    const max = Math.max(1, ...points.map((p) => p.value));
+    const step = points.length > 1 ? (W - padL - 10) / (points.length - 1) : 0;
+    const xy = points.map((p, i) => [padL + i * step, H - padB - (p.value / max) * (H - padB - padT)]);
+    const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, class: 'chart-svg', role: 'img', 'aria-label': 'Line chart of approved minutes per week' });
+    [0, Math.round(max / 2), max].forEach((t) => {
+      const y = H - padB - (t / max) * (H - padB - padT);
+      svg.appendChild(s('line', { x1: padL, x2: W, y1: y, y2: y, class: 'grid-line' }));
+      const tx = s('text', { x: padL - 8, y: y + 4, class: 'axis-text', 'text-anchor': 'end' }); tx.textContent = String(t); svg.appendChild(tx);
+    });
+    const d = xy.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+    svg.appendChild(s('defs', {}, s('linearGradient', { id: 'lineFill', x1: '0', x2: '0', y1: '0', y2: '1' }, s('stop', { offset: '0%', class: 'line-stop-a' }), s('stop', { offset: '100%', class: 'line-stop-b' }))));
+    if (xy.length) svg.appendChild(s('path', { d: `${d} L${xy[xy.length - 1][0]},${H - padB} L${xy[0][0]},${H - padB} Z`, fill: 'url(#lineFill)' }));
+    svg.appendChild(s('path', { d, class: 'line', fill: 'none' }));
+    const tip = chartTooltip(container);
+    xy.forEach((p, i) => {
+      const dot = s('circle', { cx: p[0], cy: p[1], r: '4', class: 'line-dot', tabindex: '0', 'aria-label': `${points[i].label}: ${points[i].value} minutes` });
+      const show = () => { dot.classList.add('on'); const r = dot.getBoundingClientRect(), c = container.getBoundingClientRect(); tip.show(`${points[i].label} · ${fmtMinutes(points[i].value)}`, r.left - c.left + r.width / 2, r.top - c.top - 10); };
+      const hide = () => { dot.classList.remove('on'); tip.hide(); };
+      dot.addEventListener('mouseenter', show); dot.addEventListener('focus', show);
+      dot.addEventListener('mouseleave', hide); dot.addEventListener('blur', hide);
+      svg.appendChild(dot);
+      if (i % Math.ceil(points.length / 7) === 0 || i === points.length - 1) { const tx = s('text', { x: p[0], y: H - 6, class: 'axis-text', 'text-anchor': 'middle' }); tx.textContent = points[i].short; svg.appendChild(tx); }
+    });
+    container.replaceChildren(svg, container.querySelector('.chart-tip') || h('div', { class: 'chart-tip' }));
+  }
+
+  function renderAnalytics() {
+    const since = Date.now() - rangeDays * DAY;
+    const created = (t) => toMs(t.created_at || t.window_start);
+    const inRange = tasks().filter((t) => created(t) >= since);
+    const ended = inRange.filter((t) => ['completed', 'terminated', 'expired'].includes(t.status));
+    const completed = inRange.filter((t) => t.status === 'completed').length;
+    const minutes = inRange.reduce((n, t) => n + (Number(t.duration_minutes) || 0), 0);
+    const events = isClient() ? alerts.filter((a) => toMs(a.occurred_at) >= since).length : inRange.reduce((n, t) => n + (Number(t.intrusion_count) || 0), 0);
+    $('anKpis').replaceChildren(
+      kpiCard({ label: 'Tickets', value: fmtNum(inRange.length), sub: `last ${rangeDays} days`, tone: 'indigo', iconName: 'ticket' }),
+      kpiCard({ label: 'Approved access', value: fmtMinutes(minutes), sub: inRange.length ? `avg ${Math.round(minutes / inRange.length)} min per ticket` : 'no tickets', tone: 'cyan', iconName: 'clock' }),
+      kpiCard({ label: 'Completion rate', value: ended.length ? `${Math.round((completed / ended.length) * 100)}%` : '-', sub: `${completed} of ${ended.length} finished normally`, tone: 'green', iconName: 'check' }),
+      kpiCard({ label: 'Security events', value: fmtNum(events), sub: events ? 'sessions ended for breaking scope' : 'clean record', tone: events ? 'red' : 'slate', iconName: 'shield' })
+    );
+
+    // Tickets per day (per week for 90 days)
+    let buckets = perDay(inRange, created, rangeDays);
+    let label = (b) => new Date(b.start).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+    if (rangeDays > 45) {
+      const weeks = [];
+      for (let i = 0; i < buckets.length; i += 7) weeks.push({ start: buckets[i].start, value: buckets.slice(i, i + 7).reduce((n, b) => n + b.value, 0) });
+      buckets = weeks;
+      label = (b) => `Week of ${new Date(b.start).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`;
+    }
+    $('anBarsNote').textContent = rangeDays > 45 ? 'per week' : 'per day';
+    barChart($('anBars'), buckets, label);
+
+    // Approved minutes per week
+    const weeksN = Math.max(2, Math.ceil(rangeDays / 7));
+    const thisWeekStart = startOfDay(Date.now()) - ((new Date().getDay() + 6) % 7) * DAY;   // Monday
+    const weeks = Array.from({ length: weeksN }, (_, i) => { const st = thisWeekStart - (weeksN - 1 - i) * 7 * DAY; return { st, value: 0 }; });
+    tasks().forEach((t) => { const ms = created(t); const w = weeks.find((x) => ms >= x.st && ms < x.st + 7 * DAY); if (w) w.value += Number(t.duration_minutes) || 0; });
+    lineChart($('anLine'), weeks.map((w) => ({ value: w.value, label: `Week of ${new Date(w.st).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`, short: new Date(w.st).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) })));
+
+    // Outcomes
+    const order = ['completed', 'active', 'pending', 'expired', 'terminated'];
+    const counts = order.map((k) => ({ k, n: inRange.filter((t) => t.status === k).length })).filter((c) => c.n);
+    const total = counts.reduce((n, c) => n + c.n, 0);
+    const out = $('anOutcomes');
+    out.replaceChildren();
+    if (!total) out.appendChild(h('p', { class: 'muted', text: 'No tickets in this period.' }));
+    else {
+      out.appendChild(h('div', { class: 'stack', role: 'img', 'aria-label': counts.map((c) => `${STATUS[c.k].label}: ${c.n}`).join(', ') },
+        counts.map((c) => h('span', { class: `stack-seg tone-${STATUS[c.k].tone}`, style: `flex:${c.n}`, title: `${STATUS[c.k].label}: ${c.n}` }))));
+      out.appendChild(h('ul', { class: 'legend' }, counts.map((c) => h('li', {},
+        h('span', { class: `legend-dot tone-${STATUS[c.k].tone}`, 'aria-hidden': 'true' }), h('span', { text: STATUS[c.k].label }),
+        h('strong', { text: `${c.n}` }), h('span', { class: 'muted', text: `${Math.round((c.n / total) * 100)}%` })))));
+    }
+
+    // Top apps
+    const appCount = new Map();
+    inRange.forEach((t) => appsOf(t).forEach((a) => appCount.set(a, (appCount.get(a) || 0) + 1)));
+    const top = [...appCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+    const maxA = Math.max(1, ...top.map((x) => x[1]));
+    $('anApps').replaceChildren(top.length
+      ? h('ul', { class: 'hbars' }, top.map(([name, n]) => h('li', {}, h('div', { class: 'hbar-row' }, h('span', { text: name }), h('strong', { text: String(n) })),
+        h('div', { class: 'hbar' }, h('span', { style: `width:${(n / maxA) * 100}%` })))))
+      : h('p', { class: 'muted', text: 'No apps approved in this period.' }));
+  }
+
+  // ---------- SETTINGS & BILLING ----------
+  let settingsTab = 'billing';
+  function renderSettings() {
+    const u = deps.getUser();
+    if (!u) return;
+    const tabs = [...document.querySelectorAll('#setTabs .seg-btn')];
+    if (!isClient() && settingsTab === 'billing') settingsTab = 'account';
+    tabs.forEach((b) => {
+      if (b.dataset.tab === 'billing') b.classList.toggle('hidden', !isClient());
+      const on = b.dataset.tab === settingsTab;
+      b.classList.toggle('active', on); b.setAttribute('aria-selected', String(on));
+    });
+    document.querySelectorAll('#settingsPanel .set-section').forEach((sec) => sec.classList.toggle('hidden', sec.dataset.section !== settingsTab));
+    applyTheme(currentThemePref, false);
+
+    // Plan & billing
+    if (isClient()) {
+      const st = plan;
+      const usage = $('setUsage');
+      usage.replaceChildren();
+      if (!st) usage.appendChild(h('p', { class: 'muted', text: 'Loading your plan...' }));
+      else {
+        const left = (ms) => Math.max(0, Math.ceil((ms - Date.now()) / DAY));
+        const item = (k, v, tone) => h('div', { class: `usage-item${tone ? ' ' + tone : ''}` }, h('span', { class: 'usage-k', text: k }), h('strong', { class: 'usage-v', text: v }));
+        usage.append(...[
+          item('Current plan', PLAN_LABEL[st.plan] || st.plan, `tone-text-${st.plan}`),
+          st.plan === 'trial' ? item('Trial ends', `${new Date(st.trialEndsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })} (${left(st.trialEndsAt)} days)`) : null,
+          st.plan === 'member' ? item('Membership until', new Date(st.memberUntil).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })) : null,
+          st.plan === 'free' ? item('Free tasks left', `${st.freeLeft} of ${st.freeLimit} this month`) : item('Tasks', st.plan === 'legacy' ? 'Unlimited' : 'Unlimited, any length'),
+          item('AI assistant', st.chatbot ? (st.chatbotConfigured ? 'Included' : 'Included (not set up on server)') : 'Not included')].filter(Boolean));
+      }
+      const tiers = $('setTiers');
+      tiers.replaceChildren();
+      const monthly = st && (st.memberships || []).find((m) => m.plan === 'monthly');
+      const yearly = st && (st.memberships || []).find((m) => m.plan === 'yearly');
+      const inr = (v) => Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+      const feat = (on, text) => h('li', { class: on ? 'yes' : 'no' }, h('span', { class: 'feat-ico', 'aria-hidden': 'true' }, on ? '✓' : '✕'), h('span', { text }));
+      const tier = ({ name, price, per, blurb, features, current, cta, glow, badge, onBuy }) => h('article', { class: `tier${glow ? ' tier-glow tier-' + glow : ''}${current ? ' tier-current' : ''}` },
+        badge ? h('span', { class: 'tier-badge', text: badge }) : null,
+        h('h3', { text: name }),
+        h('p', { class: 'tier-price' }, h('strong', { text: price }), per ? h('span', { text: per }) : null),
+        h('p', { class: 'tier-blurb', text: blurb }),
+        h('ul', { class: 'tier-feats' }, features),
+        current ? h('div', { class: 'tier-cta current', text: 'Current plan' })
+          : onBuy ? h('button', { type: 'button', class: `tier-cta tier-buy${glow ? ' accent' : ''}`, text: cta, onclick: onBuy })
+          : h('div', { class: 'tier-cta muted', text: cta }));
+      const freeN = st ? st.freeLimit : 3, freeMin = st ? st.freeMaxMinutes : 15;
+      const paymentsOn = !!(st && st.paymentsEnabled);
+      tiers.append(
+        tier({ name: 'Free', price: '₹0', per: '/ forever', blurb: 'For occasional fixes.', current: st && st.plan === 'free', cta: 'After your trial',
+          features: [feat(true, `${freeN} free tasks a month (up to ${freeMin} min)`), feat(true, 'Pay per task for longer or extra tasks'), feat(true, 'Full scope enforcement + kill switch'), feat(false, 'AI assistant')] }),
+        tier({ name: 'Free trial', price: '₹0', per: `/ ${st ? st.trialDays : 30} days`, blurb: 'Everything included for new accounts.', current: st && st.plan === 'trial', cta: 'For new accounts',
+          features: [feat(true, 'Every task free, any length'), feat(true, 'AI assistant included'), feat(true, 'Full scope enforcement + kill switch'), feat(true, 'Then moves to Free automatically')] }),
+        tier({ name: 'Member · Monthly', price: monthly ? `₹${inr(monthly.priceInr)}` : '₹299', per: '/ month', blurb: 'For offices that need help often.', glow: 'indigo', badge: 'Popular',
+          current: false, cta: !paymentsOn ? 'Payments are off' : st && st.plan === 'member' ? 'Add 30 days' : 'Upgrade monthly', onBuy: paymentsOn ? () => ScopeDeskPlans.buy('monthly') : null,
+          features: [feat(true, 'Unlimited tasks, any length'), feat(true, 'AI assistant'), feat(true, 'No per-task payments'), feat(true, 'Renew early and the days add on')] }),
+        tier({ name: 'Member · Yearly', price: yearly ? `₹${inr(yearly.priceInr)}` : '₹2,999', per: '/ year', glow: 'emerald',
+          badge: monthly && yearly && monthly.priceInr * 12 > yearly.priceInr ? `Save ₹${inr(Math.round(monthly.priceInr * 12 - yearly.priceInr))}` : 'Best value',
+          blurb: 'Best price for the whole year.', current: false, cta: !paymentsOn ? 'Payments are off' : st && st.plan === 'member' ? 'Add 365 days' : 'Upgrade yearly', onBuy: paymentsOn ? () => ScopeDeskPlans.buy('yearly') : null,
+          features: [feat(true, 'Everything in Monthly'), feat(true, '12 months for the price of about 10'), feat(true, 'One payment, no renewals to remember'), feat(true, 'Days stack on a current membership')] })
+      );
+      $('setBillingNote').textContent = st && !st.paymentsEnabled
+        ? 'Payments are switched off on this server, so every feature is free for everyone.'
+        : 'Payments are processed by Razorpay. ScopeDesk never sees your card details. Memberships do not renew automatically.';
+    }
+
+    // Account
+    const row = (k, v) => h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: k }), h('span', { class: 'kv-v', text: v || '-' }));
+    $('setAccount').replaceChildren(
+      h('div', { class: 'acct-head' }, h('div', { class: 'acct-avatar', text: u.username.charAt(0).toUpperCase() }), h('div', {}, h('h3', { text: u.username }), h('p', { class: 'muted', text: isClient() ? 'Client account (office admin)' : 'Vendor account (support engineer)' }))),
+      row('Username', u.username), row('Organisation', u.organization || 'Not set'), row('Account type', isClient() ? 'Client' : 'Vendor'),
+      h('div', { class: 'acct-actions' }, h('button', { type: 'button', class: 'btn-ghost-dark', onclick: deps.logout }, icon('logout', 'btn-ico'), 'Sign out')));
+
+    // Security
+    const rule = (title, text) => h('li', {}, h('span', { class: 'rule-ico' }, icon('shield')), h('div', {}, h('strong', { text: title }), h('p', { class: 'muted', text })));
+    $('setSecurity').replaceChildren(h('ul', { class: 'rules' },
+      rule('Task-bounded access', 'A vendor can only connect with the one-time token of a ticket that was sent to their account, inside its time window.'),
+      rule('Only approved apps and folders', 'The host agent on the client\'s PC watches the window in front. Any app or folder outside the ticket\'s scope stops input at once and ends the session.'),
+      rule('Kill switch', '"Terminate Session Now" stops remote control on this PC first, then revokes the token and disconnects the vendor, even if the internet is slow.'),
+      rule('Revoked tokens stay revoked', 'A terminated, expired or completed ticket can never be reopened with its token.'),
+      rule('Private board and assistant', 'Your board cards and assistant conversations are yours only. Never paste passwords, OTPs or tokens into the assistant.')));
+
+    // Shortcuts
+    const mod = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘' : 'Ctrl';
+    const sc = (keys, text) => h('li', {}, h('span', { class: 'keys' }, keys.map((k) => h('kbd', { text: k }))), h('span', { text }));
+    $('setShortcuts').replaceChildren(h('ul', { class: 'shortcuts' },
+      sc([mod, 'K'], 'Search and commands'), sc(['T'], 'Switch light / dark mode'), sc(['G', 'C'], 'Go to Command Center'), sc(['G', 'T'], 'Go to Tickets'), sc(['G', 'B'], 'Go to Boards'),
+      sc(['G', 'A'], 'Go to Analytics'), sc(['G', 'S'], 'Go to Settings & Billing'), sc(['N'], 'New support task (clients)'), sc(['Esc'], 'Close a dialog or the assistant')));
+  }
+
+  // ---------- COMMAND PALETTE ----------
+  let cmdItems = [], cmdIndex = 0;
+  function commands() {
+    const list = [
+      { group: 'Go to', label: 'Command Center', icon: 'grid', run: () => deps.route('commandCenterPanel') },
+      { group: 'Go to', label: isClient() ? 'Tickets' : 'My Tasks', icon: 'ticket', run: () => deps.route('overview-panel') },
+      { group: 'Go to', label: 'Boards', icon: 'board', run: () => deps.route('boardsPanel') },
+      { group: 'Go to', label: 'Analytics', icon: 'chart', run: () => deps.route('analyticsPanel') },
+      { group: 'Go to', label: isClient() ? 'Settings & Billing' : 'Settings', icon: 'settings', run: () => deps.route('settingsPanel') }
+    ];
+    list.push({ group: 'Appearance', label: 'Switch to light mode', icon: 'settings', hint: 'T', run: () => setTheme('light') });
+    list.push({ group: 'Appearance', label: 'Switch to dark mode', icon: 'settings', run: () => setTheme('dark') });
+    list.push({ group: 'Appearance', label: 'Match my computer (light or dark)', icon: 'settings', run: () => setTheme('system') });
+    if (isClient()) {
+      list.push({ group: 'Actions', label: 'New support task', icon: 'plus', hint: 'N', run: deps.openNewTask });
+      list.push({ group: 'Actions', label: 'Ask the AI assistant', icon: 'spark', run: deps.openAssistant });
+      list.push({ group: 'Actions', label: 'View plans & upgrade', icon: 'card', run: () => { settingsTab = 'billing'; deps.route('settingsPanel'); } });
+    } else {
+      list.push({ group: 'Actions', label: 'Open Remote Desktop', icon: 'monitor', run: deps.openSession });
+    }
+    list.push({ group: 'Actions', label: 'Add a card to my board', icon: 'board', run: () => { deps.route('boardsPanel'); setTimeout(() => $('boardAddTitle').focus(), 50); } });
+    list.push({ group: 'Actions', label: 'Sign out', icon: 'logout', run: deps.logout });
+    tasks().slice(0, 200).forEach((t) => {
+      const st = STATUS[t.status] || { label: t.status };
+      list.push({ group: isClient() ? 'Tickets' : 'Tasks', label: t.title, sub: `${counterparty(t)} · ${st.label}${t.token ? ' · ' + t.token : ''}`, icon: 'ticket', search: `${t.title} ${counterparty(t)} ${t.token || ''} ${st.label} ${appsOf(t).join(' ')}`, run: () => (t.status === 'active' && !isClient() ? deps.openSession() : deps.route('overview-panel')) });
+    });
+    return list;
+  }
+  function score(item, q) {
+    if (!q) return item.group === 'Tickets' || item.group === 'Tasks' ? 1 : 2;
+    const hay = (item.search || `${item.label} ${item.group}`).toLowerCase();
+    const label = item.label.toLowerCase();
+    if (label.startsWith(q)) return 10;
+    if (label.includes(q)) return 7;
+    if (hay.includes(q)) return 5;
+    let i = 0; for (const ch of q) { i = hay.indexOf(ch, i); if (i === -1) return 0; i += 1; }   // letters in order
+    return 2;
+  }
+  function renderCmdk() {
+    const q = $('cmdkInput').value.trim().toLowerCase();
+    const all = commands().map((it) => ({ it, sc: score(it, q) })).filter((x) => x.sc > 0);
+    if (!q) { all.forEach((x) => { if (x.it.group === 'Tickets' || x.it.group === 'Tasks') x.keep = false; }); }
+    let shown = all.filter((x) => q || (x.it.group !== 'Tickets' && x.it.group !== 'Tasks'));
+    if (!q) shown = shown.concat(all.filter((x) => x.it.group === 'Tickets' || x.it.group === 'Tasks').slice(0, 5));
+    shown.sort((a, b) => (q ? b.sc - a.sc : 0));
+    cmdItems = shown.slice(0, 40).map((x) => x.it);
+    cmdIndex = Math.min(cmdIndex, Math.max(0, cmdItems.length - 1));
+    const list = $('cmdkList');
+    list.replaceChildren();
+    if (!cmdItems.length) { list.appendChild(h('li', { class: 'cmdk-empty', text: `Nothing matches "${$('cmdkInput').value}".` })); return; }
+    let lastGroup = '';
+    cmdItems.forEach((it, i) => {
+      if (it.group !== lastGroup) { list.appendChild(h('li', { class: 'cmdk-group', role: 'presentation', text: it.group })); lastGroup = it.group; }
+      list.appendChild(h('li', { class: `cmdk-item${i === cmdIndex ? ' on' : ''}`, role: 'option', id: `cmdk-${i}`, 'aria-selected': String(i === cmdIndex),
+        onmousemove: () => { if (cmdIndex !== i) { cmdIndex = i; paintCmdk(); } }, onclick: () => runCmd(i) },
+        h('span', { class: 'cmdk-item-ico' }, icon(it.icon)),
+        h('span', { class: 'cmdk-item-text' }, h('span', { text: it.label }), it.sub ? h('small', { text: it.sub }) : null),
+        it.hint ? h('kbd', { text: it.hint }) : h('span', { class: 'cmdk-enter', text: '↵' })));
+    });
+    $('cmdkInput').setAttribute('aria-activedescendant', `cmdk-${cmdIndex}`);
+  }
+  function paintCmdk() {
+    document.querySelectorAll('.cmdk-item').forEach((el) => { const on = el.id === `cmdk-${cmdIndex}`; el.classList.toggle('on', on); el.setAttribute('aria-selected', String(on)); if (on) el.scrollIntoView({ block: 'nearest' }); });
+    $('cmdkInput').setAttribute('aria-activedescendant', `cmdk-${cmdIndex}`);
+  }
+  function runCmd(i) { const it = cmdItems[i]; closeCmdk(); if (it) it.run(); }
+  let lastFocus = null;
+  function openCmdk() {
+    if (!running) return;
+    lastFocus = document.activeElement;
+    $('cmdk').classList.remove('hidden');
+    $('cmdkInput').value = '';
+    cmdIndex = 0;
+    renderCmdk();
+    setTimeout(() => $('cmdkInput').focus(), 0);
+  }
+  function closeCmdk() {
+    if ($('cmdk').classList.contains('hidden')) return;
+    $('cmdk').classList.add('hidden');
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+
+  // ---------- keyboard ----------
+  let gPressed = 0;
+  const typing = (el) => el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+  const anyModalOpen = () => !!document.querySelector('.modal-overlay.open') || !$('terminationOverlay').hidden;
+  function onKey(e) {
+    if (!running) return;
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); $('cmdk').classList.contains('hidden') ? openCmdk() : closeCmdk(); return; }
+    if (!$('cmdk').classList.contains('hidden')) {
+      if (e.key === 'Escape') { e.preventDefault(); closeCmdk(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); cmdIndex = Math.min(cmdItems.length - 1, cmdIndex + 1); paintCmdk(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); cmdIndex = Math.max(0, cmdIndex - 1); paintCmdk(); }
+      else if (e.key === 'Enter') { e.preventDefault(); runCmd(cmdIndex); }
+      return;
+    }
+    if (typing(document.activeElement) || e.ctrlKey || e.metaKey || e.altKey || anyModalOpen()) return;
+    const k = e.key.toLowerCase();
+    if (gPressed && Date.now() - gPressed < 1200) {
+      gPressed = 0;
+      const to = { c: 'commandCenterPanel', t: 'overview-panel', b: 'boardsPanel', a: 'analyticsPanel', s: 'settingsPanel' }[k];
+      if (to) { e.preventDefault(); deps.route(to); }
+      return;
+    }
+    if (k === 'g') { gPressed = Date.now(); return; }
+    if (k === 'n' && isClient()) { e.preventDefault(); deps.openNewTask(); }
+    if (k === 't') { e.preventDefault(); setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'); }
+  }
+
+  // ---------- data loading ----------
+  async function loadAlerts() {
+    if (!isClient()) { alerts = []; return; }
+    try { alerts = (await deps.api('/api/alerts')).alerts || []; } catch (_) { /* keep the last list */ }
+  }
+  function renderCurrent() {
+    if (!running) return;
+    renderTopbar();
+    if (currentPanel === 'commandCenterPanel') renderCommandCenter();
+    else if (currentPanel === 'analyticsPanel') renderAnalytics();
+    else if (currentPanel === 'boardsPanel') renderBoard();
+    else if (currentPanel === 'settingsPanel') renderSettings();
+  }
+
+  function bind() {
+    $('btnOpenCmdk').addEventListener('click', openCmdk);
+    $('ccSearch').addEventListener('click', openCmdk);
+    $('ccNewTask').addEventListener('click', () => deps.openNewTask());
+    $('btnTopAssistant').addEventListener('click', () => deps.openAssistant());
+    $('topPlanPill').addEventListener('click', () => { settingsTab = 'billing'; deps.route('settingsPanel'); });
+    $('cmdk').addEventListener('mousedown', (e) => { if (e.target === $('cmdk')) closeCmdk(); });
+    $('cmdkInput').addEventListener('input', () => { cmdIndex = 0; renderCmdk(); });
+    document.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => deps.route(b.dataset.go)));
+    document.addEventListener('keydown', onKey);
+
+    $('boardAddForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = $('boardAddTitle');
+      const title = input.value.trim();
+      if (!title) { input.focus(); return; }
+      input.value = '';
+      try {
+        const res = await deps.api('/api/board', { method: 'POST', body: { title, priority: $('boardAddPriority').value } });
+        board.push(res.item);
+        renderBoard();
+      } catch (err) { input.value = title; deps.toast(err.message, true); }
+      input.focus();
+    });
+    document.querySelectorAll('#boardsPanel .seg-btn').forEach((b) => b.addEventListener('click', () => {
+      boardView = b.dataset.view;
+      document.querySelectorAll('#boardsPanel .seg-btn').forEach((x) => { const on = x === b; x.classList.toggle('active', on); x.setAttribute('aria-selected', String(on)); });
+      renderBoard();
+    }));
+    document.querySelectorAll('#anRange .seg-btn').forEach((b) => b.addEventListener('click', () => {
+      rangeDays = Number(b.dataset.days);
+      document.querySelectorAll('#anRange .seg-btn').forEach((x) => { const on = x === b; x.classList.toggle('active', on); x.setAttribute('aria-selected', String(on)); });
+      renderAnalytics();
+    }));
+    document.querySelectorAll('#setTabs .seg-btn').forEach((b) => b.addEventListener('click', () => { settingsTab = b.dataset.tab; renderSettings(); }));
+    if (window.ScopeDeskPlans) ScopeDeskPlans.onChange((st) => { plan = st; renderTopbar(); if (currentPanel === 'settingsPanel') renderSettings(); });
+    setInterval(() => { if (running && currentPanel === 'commandCenterPanel' && !document.hidden) renderCommandCenter(); }, 60000);   // "5 min ago" stays true
+  }
+
+  window.ScopeDeskWorkspace = {
+    init(d) { if (deps) return; deps = d; bind(); },
+    async start() {
+      running = true;
+      boardLoaded = false; board = [];
+      renderTopbar();
+      await loadAlerts();
+      renderCurrent();
+      loadBoard();
+    },
+    stop() { running = false; alerts = []; board = []; boardLoaded = false; plan = null; closeCmdk(); },
+    onRoute(panelId) {
+      currentPanel = panelId;
+      if (!running) return;
+      if (panelId === 'commandCenterPanel' || panelId === 'analyticsPanel') loadAlerts().then(renderCurrent);
+      renderCurrent();
+      const main = document.querySelector('.main-content'); if (main) main.scrollTop = 0;
+    },
+    onTasks() { renderCurrent(); },
+    openPalette: openCmdk
+  };
+})();
