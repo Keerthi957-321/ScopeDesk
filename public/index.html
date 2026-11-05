@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ScopeDesk - Secure Remote Support Sandbox</title>
-    <link rel="stylesheet" href="style.css?v=6">
+    <link rel="stylesheet" href="style.css?v=7">
 </head>
 <body>
 
@@ -189,6 +189,16 @@
                 <a href="#" class="nav-item active" data-target="overview-panel" id="navOverviewLink">📊 Primary Workspace Overview</a>
                 <a href="#" class="nav-item" data-target="session-panel" id="navSessionLink">🖥️ Remote Desktop</a>
             </nav>
+
+            <!-- CLIENT: current plan (trial / free / member). Filled by membership.js from GET /api/billing/status -->
+            <section id="planCard" class="plan-card hidden" aria-labelledby="planBadge">
+                <div class="plan-card-head">
+                    <span class="plan-card-label">Your plan</span>
+                    <span id="planBadge" class="plan-badge">-</span>
+                </div>
+                <p id="planDetail" class="plan-detail"></p>
+                <button type="button" id="btnUpgrade" class="plan-upgrade">See plans</button>
+            </section>
 
             <div class="sidebar-footer">
                 <div>🛡️</div>
@@ -516,6 +526,58 @@
         </div>
     </div>
 
+    <!-- ================= CLIENT: PLANS / MEMBERSHIP ================= -->
+    <div class="modal-overlay" id="planModal" role="dialog" aria-modal="true" aria-labelledby="planModalTitle">
+        <div class="modal plan-modal">
+            <div class="modal-header">
+                <h3 id="planModalTitle">Choose your plan</h3>
+                <button type="button" class="close-modal" id="btnClosePlans" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="planModalNow" class="plan-modal-now"></p>
+                <div class="plan-grid">
+                    <article class="plan-option">
+                        <h4>Free</h4>
+                        <p class="plan-price">&#8377;0</p>
+                        <ul class="plan-features">
+                            <li id="planFreeTasks">3 free tasks a month (up to 15 min each)</li>
+                            <li>Longer or extra tasks: pay per task</li>
+                            <li class="plan-no">AI assistant not included</li>
+                        </ul>
+                    </article>
+                    <article class="plan-option plan-option-member">
+                        <h4>Membership</h4>
+                        <div id="planBuyButtons" class="plan-buy"></div>
+                        <ul class="plan-features">
+                            <li>Unlimited tasks, any length, no per-task payment</li>
+                            <li>&#10024; AI assistant: help writing tasks, choosing apps, understanding alerts</li>
+                            <li>Renew early and the days add on</li>
+                        </ul>
+                    </article>
+                </div>
+                <p class="plan-footnote" id="planTrialNote"></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= CLIENT: AI ASSISTANT ================= -->
+    <button type="button" id="chatLauncher" class="chat-launcher hidden" aria-controls="chatPanel" aria-expanded="false">&#10024; AI Assistant</button>
+    <section id="chatPanel" class="chat-panel hidden" aria-labelledby="chatTitle">
+        <header class="chat-head">
+            <div><h3 id="chatTitle">ScopeDesk Assistant</h3><span id="chatPlanLine" class="chat-plan-line"></span></div>
+            <button type="button" id="btnChatClose" class="chat-close" aria-label="Close assistant">&times;</button>
+        </header>
+        <div id="chatLog" class="chat-log" role="log" aria-live="polite"></div>
+        <div id="chatLocked" class="chat-locked hidden">
+            <p id="chatLockedText">The AI assistant is part of Membership.</p>
+            <button type="button" id="btnChatUpgrade" class="btn-primary">See membership</button>
+        </div>
+        <form id="chatForm" class="chat-form" novalidate>
+            <textarea id="chatInput" rows="2" maxlength="2000" placeholder="Ask about tasks, allowed apps, alerts..." aria-label="Your question"></textarea>
+            <button type="submit" id="btnChatSend" class="btn-primary">Send</button>
+        </form>
+    </section>
+
     <!-- ================= CLIENT: VIOLATION ALERT MODAL ================= -->
     <div class="modal-overlay violation-overlay" id="violationModal" role="alertdialog" aria-modal="true" aria-labelledby="violationTitle">
         <div class="modal violation-modal" id="violationBox">
@@ -581,7 +643,8 @@
     <script src="remote-input.js?v=20261031a"></script>
     <script src="webrtc.js?v=20261029v10"></script>
     <script src="desktop-bridge.js?v=20261105a"></script>
-    <script src="script.js?v=20261105v11"></script>
-    <script src="build-check.js?v=20261105v11"></script>
+    <script src="membership.js?v=20261105a"></script>
+    <script src="script.js?v=20261105v12"></script>
+    <script src="build-check.js?v=20261105v12"></script>
 </body>
 </html>

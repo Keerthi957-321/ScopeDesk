@@ -8,7 +8,9 @@ function validateAgentConfig(cfg) {
   const taskId = Number(cfg.taskId);
   if (!Number.isInteger(taskId) || taskId <= 0) return { ok: false, error: 'Invalid task id.' };
   if (typeof cfg.token !== 'string' || cfg.token.length > 4096 || !JWT_SHAPE.test(cfg.token)) return { ok: false, error: 'Invalid agent token.' };
-  return { ok: true, value: { taskId, token: cfg.token, viewOnly: cfg.viewOnly === true } };
+  // `manual` MUST survive validation: main.js ignores every start that is not marked as the Client's own click. Dropping it here
+  // meant "Start remote control" was silently thrown away and the host agent never ran.
+  return { ok: true, value: { taskId, token: cfg.token, viewOnly: cfg.viewOnly === true, manual: cfg.manual === true } };
 }
 
 // Only the ScopeDesk page itself (same origin as the server) may talk to the main process.

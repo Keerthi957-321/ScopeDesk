@@ -2,17 +2,23 @@
 /**
  * ScopeDesk billing rules + Razorpay (Orders API, no SDK needed).
  *
- * Rules (the SERVER decides; the browser only displays what the server tells it):
- *   - Each client gets FREE_TASKS_PER_MONTH (3) free tasks per calendar month, each at most FREE_TASK_MAX_MINUTES (15) long.
- *     A free task skips payment completely.
- *   - A task longer than 15 minutes, or any task after the 3 free ones are used up this month, must be paid through Razorpay.
- *   - Payments OFF mode: when RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET is missing, every task is free and unlimited (legacy behaviour).
+ * PLANS (the SERVER decides; the browser only displays what the server tells it):
+ *   - TRIAL  : the first TRIAL_DAYS (30) days after sign-up. Every task is free (any length) and the AI assistant is included,
+ *              so a new client experiences everything.
+ *   - FREE   : after the trial. FREE_TASKS_PER_MONTH (3) free tasks per calendar month, each up to FREE_TASK_MAX_MINUTES (15).
+ *              Longer tasks, and every task after the 3 free ones, are paid per task through Razorpay. No AI assistant.
+ *   - MEMBER : paid membership (monthly or yearly, Razorpay). Unlimited free tasks + the AI assistant.
+ *   - Payments OFF mode: when RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET is missing, there are no plans: every task is free and
+ *     unlimited (legacy behaviour) and the AI assistant is open to every client (if OPENAI_API_KEY is set).
  *
  * Environment:
  *   RAZORPAY_KEY_ID=rzp_test_xxxxxxxx      (public; sent to the browser for the checkout window)
  *   RAZORPAY_KEY_SECRET=xxxxxxxxxxxxxxxx   (secret; never leaves the server)
  *   TASK_PRICES_INR=15:99,30:199,60:349,120:599   (optional; price per duration in rupees)
  *   BILLING_TIMEZONE=Asia/Kolkata          (optional; which calendar decides "this month")
+ *   MEMBERSHIP_MONTHLY_INR=299             (optional; membership price for 30 days)
+ *   MEMBERSHIP_YEARLY_INR=2999             (optional; membership price for 365 days)
+ *   TRIAL_DAYS=30                          (optional; length of the free trial after sign-up)
  *
  * Pure functions + one injectable fetch, so it is easy to test without the network.
  */
@@ -21,6 +27,8 @@ const crypto = require('crypto');
 const FREE_TASKS_PER_MONTH = 3;
 const FREE_TASK_MAX_MINUTES = 15;
 const DEFAULT_PRICES_INR = { 15: 99, 30: 199, 60: 349, 120: 599 };
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MEMBERSHIP_PLANS = { monthly: { days: 30, label: 'Monthly membership' }, yearly: { days: 365, label: 'Yearly membership' } };
 const RAZORPAY_API = 'https://api.razorpay.com/v1';
 const KEY_ID_RE = /^rzp_(test|live)_[A-Za-z0-9]{6,}$/;
 
@@ -71,18 +79,64 @@ function createBilling({ env = process.env, fetchImpl = globalThis.fetch, log = 
     return Math.ceil(minutes / 15) * (prices[15] || DEFAULT_PRICES_INR[15]);
   };
   const toPaise = (inr) => Math.round(inr * 100);   // Razorpay amounts are integers in paise (₹1 = 100 paise)
+  const positive = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 1 ? Math.round(n * 100) / 100 : d; };
+  const trialDays = Math.max(0, Math.floor(Number(env.TRIAL_DAYS != null && env.TRIAL_DAYS !== '' ? env.TRIAL_DAYS : 30)) || 0);
+  const membershipPrices = { monthly: positive(env.MEMBERSHIP_MONTHLY_INR, 299), yearly: positive(env.MEMBERSHIP_YEARLY_INR, 2999) };
+
+  const toDate = (v) => {
+    if (v instanceof Date) return v;
+    const s = String(v || '');
+    if (!s) return new Date(NaN);
+    return new Date(s.includes('T') || s.endsWith('Z') ? s : s.replace(' ', 'T') + 'Z');   // SQLite datetime('now') is UTC without a zone
+  };
+
+  /**
+   * Which plan this client is on RIGHT NOW, from the database row (users.created_at, users.membership_until).
+   * Returns { plan: 'legacy'|'member'|'trial'|'free', chatbot, unlimitedTasks, trialEndsAt, memberUntil } (times in ms or null).
+   */
+  function entitlements({ createdAt, memberUntil, now = Date.now() } = {}) {
+    const until = toDate(memberUntil).getTime();
+    const memberUntilMs = Number.isFinite(until) && until > now ? until : null;
+    const created = toDate(createdAt).getTime();
+    const trialEnd = Number.isFinite(created) ? created + trialDays * DAY_MS : NaN;
+    const trialEndsAt = Number.isFinite(trialEnd) && trialEnd > now ? trialEnd : null;
+    if (!keys.enabled) return { plan: 'legacy', chatbot: true, unlimitedTasks: true, trialEndsAt: null, memberUntil: null };
+    if (memberUntilMs) return { plan: 'member', chatbot: true, unlimitedTasks: true, trialEndsAt, memberUntil: memberUntilMs };
+    if (trialEndsAt) return { plan: 'trial', chatbot: true, unlimitedTasks: true, trialEndsAt, memberUntil: null };
+    return { plan: 'free', chatbot: false, unlimitedTasks: false, trialEndsAt: null, memberUntil: null };
+  }
+
+  /** New membership end time: a renewal before expiry adds the days on top of what is left. */
+  function extendMembership(currentUntil, planKey, now = Date.now()) {
+    const plan = MEMBERSHIP_PLANS[planKey];
+    if (!plan) throw new Error('Unknown membership plan.');
+    const cur = toDate(currentUntil).getTime();
+    const from = Number.isFinite(cur) && cur > now ? cur : now;
+    return new Date(from + plan.days * DAY_MS);
+  }
+
+  function membershipQuote(planKey) {
+    const plan = MEMBERSHIP_PLANS[planKey];
+    if (!plan) return null;
+    const priceInr = membershipPrices[planKey];
+    return { plan: planKey, label: plan.label, days: plan.days, priceInr, amountPaise: toPaise(priceInr), currency: 'INR' };
+  }
 
   /**
    * The one decision. `freeUsed` = free tasks this client already created this calendar month (from the database).
    * Returns { billing: 'legacy'|'free'|'paid', free, ... }.
    */
-  function decide({ durationMinutes, freeUsed }) {
+  function decide({ durationMinutes, freeUsed, plan = 'free' }) {
     if (!keys.enabled) {
-      return { paymentsEnabled: false, billing: 'legacy', free: true, unlimited: true, freeLimit: null, freeLeft: null, amountPaise: 0, priceInr: 0 };
+      return { paymentsEnabled: false, plan: 'legacy', billing: 'legacy', free: true, unlimited: true, freeLimit: null, freeLeft: null, amountPaise: 0, priceInr: 0 };
+    }
+    // Trial and members: every task free, any length. Stored as their own billing kind, so they never use up the monthly free allowance.
+    if (plan === 'member' || plan === 'trial') {
+      return { paymentsEnabled: true, plan, billing: plan, free: true, unlimited: true, freeLimit: FREE_TASKS_PER_MONTH, freeMaxMinutes: FREE_TASK_MAX_MINUTES, freeLeft: null, amountPaise: 0, priceInr: 0 };
     }
     const used = Math.max(0, Number(freeUsed) || 0);
     const freeLeft = Math.max(0, FREE_TASKS_PER_MONTH - used);
-    const base = { paymentsEnabled: true, freeLimit: FREE_TASKS_PER_MONTH, freeMaxMinutes: FREE_TASK_MAX_MINUTES, freeLeft, unlimited: false };
+    const base = { paymentsEnabled: true, plan: 'free', freeLimit: FREE_TASKS_PER_MONTH, freeMaxMinutes: FREE_TASK_MAX_MINUTES, freeLeft, unlimited: false };
     if (durationMinutes <= FREE_TASK_MAX_MINUTES && freeLeft > 0) {
       return { ...base, billing: 'free', free: true, freeLeftAfter: freeLeft - 1, amountPaise: 0, priceInr: 0 };
     }
@@ -149,12 +203,18 @@ function createBilling({ env = process.env, fetchImpl = globalThis.fetch, log = 
     month: (date = new Date()) => billingMonth(date, timeZone),
     priceInrFor,
     decide,
+    entitlements,
+    extendMembership,
+    membershipQuote,
+    membershipPrices,
+    trialDays,
+    MEMBERSHIP_PLANS,
     createOrder,
     verifySignature,
     describe: () => (keys.enabled
-      ? `Payments:  Razorpay ${keys.mode} mode (${FREE_TASKS_PER_MONTH} free tasks of up to ${FREE_TASK_MAX_MINUTES} min per month, then paid)`
+      ? `Payments:  Razorpay ${keys.mode} mode (trial ${trialDays} days; free plan ${FREE_TASKS_PER_MONTH} tasks of up to ${FREE_TASK_MAX_MINUTES} min/month; membership \u20b9${membershipPrices.monthly}/month or \u20b9${membershipPrices.yearly}/year)`
       : `Payments:  OFF (${keys.why}). Every task is free and unlimited.`)
   };
 }
 
-module.exports = { createBilling, billingMonth, parsePriceTable, FREE_TASKS_PER_MONTH, FREE_TASK_MAX_MINUTES };
+module.exports = { createBilling, billingMonth, parsePriceTable, FREE_TASKS_PER_MONTH, FREE_TASK_MAX_MINUTES, MEMBERSHIP_PLANS };

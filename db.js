@@ -184,6 +184,15 @@ function initSqliteTables() {
     );
     CREATE INDEX IF NOT EXISTS idx_payment_orders_client ON payment_orders (client_id);
   `);
+  // MEMBERSHIP: what an order pays for ('task' = one paid task, 'membership' = monthly / yearly plan)
+  const orderCols = sqliteDb.prepare('PRAGMA table_info(payment_orders)').all().map((c) => c.name);
+  if (!orderCols.includes('kind')) sqliteDb.exec("ALTER TABLE payment_orders ADD COLUMN kind TEXT NOT NULL DEFAULT 'task'");
+  if (!orderCols.includes('plan')) sqliteDb.exec("ALTER TABLE payment_orders ADD COLUMN plan TEXT NOT NULL DEFAULT ''");
+  // users.membership_until: ISO time the paid membership ends ('' = never had one). The plan itself is worked out from this
+  // and users.created_at (trial) every time, so there is no "plan" flag that could be stale.
+  const memberCols = sqliteDb.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!memberCols.includes('membership_until')) sqliteDb.exec("ALTER TABLE users ADD COLUMN membership_until TEXT NOT NULL DEFAULT ''");
+  if (!memberCols.includes('membership_plan')) sqliteDb.exec("ALTER TABLE users ADD COLUMN membership_plan TEXT NOT NULL DEFAULT ''");
   sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks (assigned_vendor_user_id)');
   sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_vendors_client ON vendors (client_id, vendor_user_id)');
   installTrustEngine();

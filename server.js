@@ -32,6 +32,7 @@ const appCatalog = require('./agent/app-catalog');
 const { buildRtcConfig, relayConfigured, describeIceSetup } = require('./server/rtc-config');
 const { loadJwtSecret, buildOriginChecker } = require('./server/net-config');
 const { createBilling } = require('./server/billing');
+const { createAssistant } = require('./server/assistant');
 
 const app = express();
 const server = http.createServer(app);
@@ -54,7 +55,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const BUILD = '2026-11-05-v11'; // shown on the page so you can tell which version you are looking at
+const BUILD = '2026-11-05-v12'; // shown on the page so you can tell which version you are looking at
 const APP_URL = (process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`)).replace(/\/+$/, '');
 if (IS_PRODUCTION) app.set('trust proxy', 1); // behind Railway's proxy: real client IPs for rate limits
 
@@ -76,6 +77,8 @@ mailer.verify().catch(() => { /* already reported by verify() */ });
 // ================= PAYMENTS (Razorpay) =================
 // No RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET -> payments OFF: every task is free and unlimited (legacy behaviour). See server/billing.js.
 const billing = createBilling({ env: process.env, log: console });
+// AI assistant (OpenAI). Off when OPENAI_API_KEY is missing. Who may use it is decided per request from the client's plan.
+const assistant = createAssistant({ env: process.env, log: console });
 
 // ================= CONSTANTS =================
 const DUPLICATE_ACCOUNT_MSG = 'An account with this email/username already exists. Please Sign In instead.';
@@ -1254,9 +1257,23 @@ async function insertTask(user, prep, { billingKind, month, amountPaise = 0, pay
   return task;
 }
 
+// The client's plan right now (trial / free / member / legacy), worked out from the database every time
+async function planFor(userId) {
+  const u = await db.get('SELECT created_at, membership_until, membership_plan FROM users WHERE id = ?', [userId]);
+  return { ...billing.entitlements({ createdAt: u && u.created_at, memberUntil: u && u.membership_until }), membershipPlan: (u && u.membership_plan) || '' };
+}
+async function decideFor(userId, durationMinutes, month) {
+  const ent = await planFor(userId);
+  const freeUsed = billing.enabled && ent.plan === 'free' ? await freeTasksUsed(userId, month) : 0;
+  return { decision: billing.decide({ durationMinutes, freeUsed, plan: ent.plan }), ent };
+}
+
 // What the browser may show about a decision (never the secret, never anything it could send back to change the price)
-function publicBilling(decision, month) {
+function publicBilling(decision, month, ent) {
   return {
+    plan: decision.plan,
+    trialEndsAt: ent ? ent.trialEndsAt : null,
+    memberUntil: ent ? ent.memberUntil : null,
     paymentsEnabled: decision.paymentsEnabled,
     free: decision.free,
     unlimited: !!decision.unlimited,
@@ -1278,8 +1295,98 @@ app.get('/api/billing/quote', authenticateToken, requireRole('client'), async (r
   const duration = Number(req.query.duration_minutes);
   if (!taskScope.DURATION_OPTIONS.includes(duration)) return res.status(400).json({ error: `Duration must be one of: ${taskScope.DURATION_OPTIONS.join(', ')} minutes.` });
   const month = billing.month();
-  const decision = billing.decide({ durationMinutes: duration, freeUsed: billing.enabled ? await freeTasksUsed(req.user.userId, month) : 0 });
-  res.json(publicBilling(decision, month));
+  const { decision, ent } = await decideFor(req.user.userId, duration, month);
+  res.json(publicBilling(decision, month, ent));
+});
+
+// One Razorpay order for either a paid task or a membership. Returns { status, body } to send.
+async function createGatewayOrder(user, { kind, plan = '', amountPaise, durationMinutes = 0, requestJson = '{}', description, notes }) {
+  const insert = await db.run(
+    "INSERT INTO payment_orders (client_id, amount_paise, currency, duration_minutes, request_json, status, kind, plan) VALUES (?, ?, 'INR', ?, ?, 'created', ?, ?)",
+    [user.userId, amountPaise, durationMinutes, requestJson, kind, plan]
+  );
+  const localId = insert.lastInsertRowid;
+  let order;
+  try {
+    order = await billing.createOrder({
+      amountPaise,
+      receipt: `scopedesk_${localId}`,
+      notes: { scopedesk_order: String(localId), client_id: String(user.userId), kind, plan, ...(notes || {}) }
+    });
+  } catch (err) {
+    await db.run("UPDATE payment_orders SET status = 'unfulfilled', error = ? WHERE id = ?", [String(err.code || err.message).slice(0, 200), localId]);
+    console.error('[BILLING] order creation failed:', err.code || err.message);
+    return { status: 502, body: { error: 'The payment gateway is not available right now. No money was taken. Please try again in a minute.', code: 'GATEWAY_UNAVAILABLE' } };
+  }
+  await db.run('UPDATE payment_orders SET razorpay_order_id = ? WHERE id = ?', [order.id, localId]);
+  const me = await db.get('SELECT username, email, organization FROM users WHERE id = ?', [user.userId]);
+  await logAudit(user.userId, 'PAYMENT_ORDER_CREATED', { orderId: order.id, kind, plan, amountPaise, duration: durationMinutes });
+  return {
+    status: 200,
+    payment: {
+      keyId: billing.keyId,                  // public key only; the secret never leaves the server
+      orderId: order.id,
+      amount: order.amount,                  // paise, exactly what Razorpay will charge
+      currency: order.currency || 'INR',
+      name: 'ScopeDesk',
+      description,
+      prefill: { name: (me && (me.organization || me.username)) || '', email: (me && me.email) || '' }
+    }
+  };
+}
+
+// Plan card + upgrade dialog: current plan, trial / membership end, free tasks left, membership prices, AI assistant availability
+app.get('/api/billing/status', authenticateToken, requireRole('client'), async (req, res) => {
+  const month = billing.month();
+  const ent = await planFor(req.user.userId);
+  const used = billing.enabled && ent.plan === 'free' ? await freeTasksUsed(req.user.userId, month) : 0;
+  res.json({
+    paymentsEnabled: billing.enabled,
+    plan: ent.plan,
+    chatbot: ent.chatbot,
+    chatbotConfigured: assistant.configured,
+    trialEndsAt: ent.trialEndsAt,
+    trialDays: billing.trialDays,
+    memberUntil: ent.memberUntil,
+    membershipPlan: ent.membershipPlan,
+    freeLimit: billing.FREE_TASKS_PER_MONTH,
+    freeMaxMinutes: billing.FREE_TASK_MAX_MINUTES,
+    freeLeft: ent.plan === 'free' ? Math.max(0, billing.FREE_TASKS_PER_MONTH - used) : null,
+    memberships: billing.enabled ? ['monthly', 'yearly'].map((k) => billing.membershipQuote(k)) : []
+  });
+});
+
+// AI assistant. body: { messages: [{ role: 'user'|'assistant', content }] }. Allowed only on plans that include it (trial, member,
+// payments off): checked HERE on every message, so unlocking the chat box in the page does nothing.
+app.post('/api/chat', authenticateToken, requireRole('client'), async (req, res) => {
+  const ent = await planFor(req.user.userId);
+  if (!ent.chatbot) return res.status(402).json({ error: 'The AI assistant is included in the free trial and in Membership. Upgrade to keep using it.', code: 'MEMBERSHIP_REQUIRED' });
+  if (!assistant.configured) return res.status(503).json({ error: 'The AI assistant is not set up on this server yet (OPENAI_API_KEY is missing).', code: 'AI_NOT_CONFIGURED' });
+  const limitKey = `chat|${req.user.userId}`;
+  if (isLimited(limitKey, 40)) return res.status(429).json({ error: 'You have sent a lot of questions. Please wait a few minutes.' });
+  recordAttempt(limitKey, 60 * 60 * 1000);
+  const clean = assistant.cleanMessages(req.body && req.body.messages);
+  if (clean.error) return res.status(400).json({ error: clean.error });
+  try {
+    const reply = await assistant.reply(clean.messages, { clientName: req.user.organization || req.user.username });
+    res.json({ reply });
+  } catch (err) {
+    console.error('[AI] chat failed:', err.code || err.message);
+    res.status(502).json({ error: err.code === 'AI_BUSY' ? 'The AI assistant is busy. Try again in a minute.' : 'The AI assistant could not answer right now. Please try again.', code: err.code || 'AI_ERROR' });
+  }
+});
+
+// Buy (or renew) a membership. body: { plan: 'monthly' | 'yearly' }. The price comes from the server, never from the browser.
+app.post('/api/membership/checkout', authenticateToken, requireRole('client'), async (req, res) => {
+  if (!billing.enabled) return res.status(400).json({ error: 'Payments are not switched on for this server, so every feature is already free.' });
+  const quote = billing.membershipQuote(String((req.body && req.body.plan) || ''));
+  if (!quote) return res.status(400).json({ error: 'Choose the monthly or the yearly membership.' });
+  const limitKey = `member-checkout|${req.user.userId}`;
+  if (isLimited(limitKey, 20)) return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+  recordAttempt(limitKey, 60 * 60 * 1000);
+  const out = await createGatewayOrder(req.user, { kind: 'membership', plan: quote.plan, amountPaise: quote.amountPaise, description: `ScopeDesk ${quote.label} (${quote.days} days)` });
+  if (out.status !== 200) return res.status(out.status).json(out.body);
+  res.json({ success: true, paymentRequired: true, membership: quote, payment: out.payment });
 });
 
 // body: { vendor_id, task, duration_minutes, allowed_apps: ["Excel", ...], alerts_enabled: true|false }
@@ -1293,51 +1400,22 @@ app.post('/api/tasks', authenticateToken, requireRole('client'), async (req, res
   recordAttempt(limitKey, 60 * 60 * 1000);
 
   const month = billing.month();
-  let decision = billing.decide({ durationMinutes: prep.t.durationMinutes, freeUsed: billing.enabled ? await freeTasksUsed(req.user.userId, month) : 0 });
+  let { decision, ent } = await decideFor(req.user.userId, prep.t.durationMinutes, month);
 
   if (decision.billing !== 'paid') {
     const task = await insertTask(req.user, prep, { billingKind: decision.billing, month });
-    if (task) return res.status(201).json({ success: true, task, billing: publicBilling(decision, month) });
+    if (task) return res.status(201).json({ success: true, task, billing: publicBilling(decision, month, ent) });
     // Another request used the last free task a moment ago: this one has to be paid
-    decision = billing.decide({ durationMinutes: prep.t.durationMinutes, freeUsed: billing.FREE_TASKS_PER_MONTH });
+    decision = billing.decide({ durationMinutes: prep.t.durationMinutes, freeUsed: billing.FREE_TASKS_PER_MONTH, plan: 'free' });
   }
 
   // ---- PAID: create a Razorpay order. The validated request is stored with it; the task is only created after a verified payment.
-  const insert = await db.run(
-    "INSERT INTO payment_orders (client_id, amount_paise, currency, duration_minutes, request_json, status) VALUES (?, ?, 'INR', ?, ?, 'created')",
-    [req.user.userId, decision.amountPaise, prep.t.durationMinutes, JSON.stringify(prep.body)]
-  );
-  const localId = insert.lastInsertRowid;
-  let order;
-  try {
-    order = await billing.createOrder({
-      amountPaise: decision.amountPaise,
-      receipt: `scopedesk_${localId}`,
-      notes: { scopedesk_order: String(localId), client_id: String(req.user.userId), duration_minutes: String(prep.t.durationMinutes) }
-    });
-  } catch (err) {
-    await db.run("UPDATE payment_orders SET status = 'unfulfilled', error = ? WHERE id = ?", [String(err.code || err.message).slice(0, 200), localId]);
-    console.error('[BILLING] order creation failed:', err.code || err.message);
-    return res.status(502).json({ error: 'The payment gateway is not available right now. No money was taken. Please try again in a minute.', code: 'GATEWAY_UNAVAILABLE' });
-  }
-  await db.run('UPDATE payment_orders SET razorpay_order_id = ? WHERE id = ?', [order.id, localId]);
-  const me = await db.get('SELECT username, email, organization FROM users WHERE id = ?', [req.user.userId]);
-  await logAudit(req.user.userId, 'PAYMENT_ORDER_CREATED', { orderId: order.id, amountPaise: decision.amountPaise, duration: prep.t.durationMinutes });
-
-  res.json({
-    success: true,
-    paymentRequired: true,
-    billing: publicBilling(decision, month),
-    payment: {
-      keyId: billing.keyId,                  // public key only; the secret never leaves the server
-      orderId: order.id,
-      amount: order.amount,                  // paise, exactly what Razorpay will charge
-      currency: order.currency || 'INR',
-      name: 'ScopeDesk',
-      description: `Remote support task: ${prep.t.durationMinutes} minutes`,
-      prefill: { name: (me && (me.organization || me.username)) || '', email: (me && me.email) || '' }
-    }
+  const out = await createGatewayOrder(req.user, {
+    kind: 'task', amountPaise: decision.amountPaise, durationMinutes: prep.t.durationMinutes, requestJson: JSON.stringify(prep.body),
+    description: `Remote support task: ${prep.t.durationMinutes} minutes`, notes: { duration_minutes: String(prep.t.durationMinutes) }
   });
+  if (out.status !== 200) return res.status(out.status).json(out.body);
+  res.json({ success: true, paymentRequired: true, billing: publicBilling(decision, month, ent), payment: out.payment });
 });
 
 // Razorpay Checkout's success handler posts here. The signature proves Razorpay saw the payment for THIS order; only then is
@@ -1355,7 +1433,10 @@ app.post('/api/payments/verify', authenticateToken, requireRole('client'), async
   const order = orderId ? await db.get('SELECT * FROM payment_orders WHERE razorpay_order_id = ? AND client_id = ?', [orderId, req.user.userId]) : null;
   if (!order) { recordAttempt(limitKey, 10 * 60 * 1000); return res.status(404).json({ error: 'Payment order not found.' }); }
 
-  // The handler can fire twice (double click, retry after a dropped connection): hand back the same task
+  // The handler can fire twice (double click, retry after a dropped connection): hand back the same result
+  if (order.status === 'fulfilled' && order.kind === 'membership') {
+    return res.status(200).json({ success: true, alreadyProcessed: true, membership: await planFor(req.user.userId) });
+  }
   if (order.status === 'fulfilled' && order.task_id) {
     const task = await db.get('SELECT * FROM tasks WHERE id = ? AND client_id = ?', [order.task_id, req.user.userId]);
     return res.status(200).json({ success: true, task, alreadyProcessed: true });
@@ -1376,7 +1457,21 @@ app.post('/api/payments/verify', authenticateToken, requireRole('client'), async
   const claim = await db.run("UPDATE payment_orders SET status = 'paid', razorpay_payment_id = ?, paid_at = ? WHERE id = ? AND status = 'created'",
     [paymentId, new Date().toISOString(), order.id]);
   if (!claim.changes) return res.status(409).json({ error: 'This payment is already being processed.' });
-  await logAudit(req.user.userId, 'PAYMENT_VERIFIED', { orderId, paymentId, amountPaise: order.amount_paise });
+  await logAudit(req.user.userId, 'PAYMENT_VERIFIED', { orderId, paymentId, amountPaise: order.amount_paise, kind: order.kind });
+
+  if (order.kind === 'membership') {
+    // Renewing before expiry adds the days on top of what is left
+    const me = await db.get('SELECT membership_until FROM users WHERE id = ?', [req.user.userId]);
+    let until;
+    try { until = billing.extendMembership(me && me.membership_until, order.plan); } catch (e) {
+      await db.run("UPDATE payment_orders SET status = 'unfulfilled', error = ? WHERE id = ?", ['unknown plan', order.id]);
+      return res.status(409).json({ error: `Payment received (${paymentId}), but the plan is unknown. Please contact support.` });
+    }
+    await db.run('UPDATE users SET membership_until = ?, membership_plan = ? WHERE id = ?', [until.toISOString(), order.plan, req.user.userId]);
+    await db.run("UPDATE payment_orders SET status = 'fulfilled' WHERE id = ?", [order.id]);
+    await logAudit(req.user.userId, 'MEMBERSHIP_ACTIVATED', { plan: order.plan, until: until.toISOString(), paymentId });
+    return res.status(200).json({ success: true, membership: await planFor(req.user.userId), payment: { paymentId, amountPaise: order.amount_paise } });
+  }
 
   let stored = null;
   try { stored = JSON.parse(order.request_json); } catch (_) { /* handled below */ }
@@ -1645,5 +1740,6 @@ server.listen(PORT, HOST, () => {
   console.log(` Database:  ${db.driver}`);
   console.log(` ${describeIceSetup()}`);
   console.log(` ${billing.describe()}`);
+  console.log(` ${assistant.describe()}`);
   console.log('====================================================');
 });

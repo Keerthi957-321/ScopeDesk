@@ -125,9 +125,11 @@ function loadServer({ env = {}, fetch } = {}) {
   const tokenFor = (u) => stubs.modules.jsonwebtoken.sign({ userId: u.id, username: u.username, role: u.role, organization: u.organization || null }, jwtSecret);
   const agentTokenFor = (u, taskId) => stubs.modules.jsonwebtoken.sign({ userId: u.id, username: u.username, role: 'client', scope: 'agent', taskId }, jwtSecret);
 
-  async function addUser(username, role) {
-    const r = await db.run("INSERT INTO users (username, email, password_hash, role, organization, email_verified, status) VALUES (?, ?, 'h:x', ?, ?, 1, 'ACTIVE')",
-      [username, `${username}@example.com`, role, `${username} Org`]);
+  // daysOld: how long ago the account was created (> 30 = the free trial is over)
+  async function addUser(username, role, { daysOld = 0 } = {}) {
+    const created = new Date(Date.now() - daysOld * 86400000).toISOString();
+    const r = await db.run("INSERT INTO users (username, email, password_hash, role, organization, email_verified, status, created_at) VALUES (?, ?, 'h:x', ?, ?, 1, 'ACTIVE', ?)",
+      [username, `${username}@example.com`, role, `${username} Org`, created]);
     return { id: r.lastInsertRowid, username, role, organization: `${username} Org` };
   }
 

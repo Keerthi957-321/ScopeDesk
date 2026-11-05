@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-11-05-v11';
+window.SCOPEDESK_BUILD = '2026-11-05-v12';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -676,6 +676,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function logout(message) {
+        try { ScopeDeskPlans.stop(); } catch (_) { /* not loaded */ }
         clearLive();
         teardownRemoteConnection();
         if (STATE.socket) { STATE.socket.disconnect(); STATE.socket = null; }
@@ -713,6 +714,7 @@ document.addEventListener('DOMContentLoaded', () => {
         connectSocket();
         loadTasks().then(() => restoreVendorSession(lastPanel));
         if (isClient) loadVendors();
+        if (isClient) ScopeDeskPlans.start(); else ScopeDeskPlans.stop();   // plan card + AI assistant are for clients only
     }
 
     function routeToPanel(panelId) {
@@ -1258,7 +1260,12 @@ document.addEventListener('DOMContentLoaded', () => {
             priceNote.classList.add('is-free');
             const strong = document.createElement('strong');
             strong.textContent = 'This task is FREE';
-            const rest = q.unlimited
+            const days = q.trialEndsAt ? Math.max(0, Math.ceil((q.trialEndsAt - Date.now()) / 86400000)) : 0;
+            const rest = q.plan === 'trial'
+                ? ` - free trial: every task is free for ${days} more day${days === 1 ? '' : 's'}.`
+                : q.plan === 'member'
+                ? ' - included in your membership (unlimited tasks).'
+                : q.unlimited
                 ? ' (payments are switched off on this server, so every task is free).'
                 : ` - ${q.freeLeft} of ${q.freeLimit} free task${q.freeLimit === 1 ? '' : 's'} left this month (free tasks can be up to ${q.freeMaxMinutes} minutes).`;
             priceNote.replaceChildren(strong, document.createTextNode(rest));
@@ -1271,7 +1278,12 @@ document.addEventListener('DOMContentLoaded', () => {
             : `You have used all ${q.freeLimit} free tasks for this month.`;
         const strong = document.createElement('strong');
         strong.textContent = `Price: ₹${formatInr(q.priceInr)}`;
-        priceNote.replaceChildren(strong, document.createTextNode(` - ${why} Free tasks left this month: ${q.freeLeft}.`));
+        const upsell = document.createElement('button');
+        upsell.type = 'button';
+        upsell.className = 'link-button';
+        upsell.textContent = 'Membership makes every task free';
+        upsell.addEventListener('click', () => ScopeDeskPlans.open());
+        priceNote.replaceChildren(strong, document.createTextNode(` - ${why} Free tasks left this month: ${q.freeLeft}. `), upsell);
         btnIssueToken.textContent = `Pay ₹${formatInr(q.priceInr)} & Issue Token`;
     }
 
@@ -1348,12 +1360,15 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    ScopeDeskPlans.init({ api, toast, loadRazorpay });
+
     function showIssuedToken(task) {
         taskModal.classList.remove('open');
         resetTaskForm();
         $('newTokenValue').textContent = task.token;
         $('newTokenNotice').classList.remove('hidden');
         loadTasks();     // remote control is NOT started here: it starts when the Client approves the vendor (share dialog)
+        ScopeDeskPlans.refresh();   // free tasks left on the plan card
     }
 
     $('btnOpenTaskModal').addEventListener('click', async () => {

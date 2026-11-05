@@ -1,3 +1,14 @@
+# Update 14 (build 2026-11-05-v12): host agent never started (fixed), membership plans, AI assistant
+
+| Change | Files |
+|---|---|
+| FIX: "Start remote control" never worked. `validateAgentConfig` dropped the `manual` flag, so `main.js` ignored every start as "not an explicit start by the Client" and the host agent never ran. Needs a rebuilt / restarted desktop app | `desktop/validate.js`, `desktop/test/validate.test.js` |
+| Plans: 30-day free trial (all tasks free + AI assistant) -> Free (3 tasks of up to 15 min a month, then pay per task, no assistant) -> Membership (monthly / yearly via Razorpay: unlimited tasks + assistant). Worked out from `users.created_at` and `users.membership_until` on every request | `server/billing.js`, `server.js`, `db.js` |
+| `GET /api/billing/status`, `POST /api/membership/checkout`; `POST /api/payments/verify` now also activates / extends memberships (renewals stack) | `server.js` |
+| AI assistant: `POST /api/chat`, OpenAI called from the server (key never sent to browsers), plan checked on every message, rate-limited, system messages from the page refused | `server/assistant.js`, `server.js` |
+| Plan card in the sidebar, plans dialog, chat widget; ticket form text for trial / member | `public/membership.js`, `public/index.html`, `public/style.css`, `public/script.js` |
+| Tests | `test/membership.test.js`; existing billing tests use clients past the trial |
+
 # Update 13 (build 2026-11-05-v11): Razorpay payments + hard "Terminate Session Now"
 
 ## Payments (Razorpay)
