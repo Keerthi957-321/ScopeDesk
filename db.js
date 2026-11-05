@@ -206,6 +206,19 @@ function initSqliteTables() {
     );
     CREATE INDEX IF NOT EXISTS idx_board_user ON board_items (user_id, status, position);
   `);
+  // MESSAGES: client <-> vendor conversation of one ticket (text, and call records such as "Missed call" / "Call 4:12")
+  sqliteDb.exec(`
+    CREATE TABLE IF NOT EXISTS task_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL,
+      sender_id INTEGER NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'text' CHECK (kind IN ('text', 'call')),
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      read_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages (task_id, id);
+  `);
   const memberCols = sqliteDb.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
   if (!memberCols.includes('membership_until')) sqliteDb.exec("ALTER TABLE users ADD COLUMN membership_until TEXT NOT NULL DEFAULT ''");
   if (!memberCols.includes('membership_plan')) sqliteDb.exec("ALTER TABLE users ADD COLUMN membership_plan TEXT NOT NULL DEFAULT ''");

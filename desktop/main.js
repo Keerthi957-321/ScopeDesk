@@ -107,19 +107,12 @@ function showError(message) { if (win) win.loadFile(path.join(__dirname, 'splash
 
 function configureSession() {
   const ses = session.defaultSession;
-  // 'media' is what Chromium asks for when a page calls getDisplayMedia(); without it the share is refused with
-  // 'permission "media" refused' and the Share button never works. It is allowed ONLY for the trusted ScopeDesk page and
-  // never for the microphone or camera (audio/video capture devices are still denied).
+  // 'media' is what Chromium asks for when a page calls getDisplayMedia() (screen sharing) or getUserMedia() (the microphone, for
+  // client <-> vendor voice calls). It is allowed ONLY for the trusted ScopeDesk page. The page asks for the microphone only when
+  // the person starts or accepts a call, and the vendor cannot press those buttons: remote input inside ScopeDesk's own window
+  // is refused by the host agent. ScopeDesk never asks for the camera.
   const allowed = new Set(['notifications', 'display-capture', 'media', 'clipboard-sanitized-write']);
-  const mayUse = (permission, url, details) => {
-    if (!allowed.has(permission) || !isTrustedSender(url, SERVER_URL)) return false;
-    if (permission === 'media') {
-      const types = (details && details.mediaTypes) || [];
-      if (types.includes('audio')) return false;                       // no microphone
-      if (details && details.mediaType === 'audio') return false;
-    }
-    return true;
-  };
+  const mayUse = (permission, url) => allowed.has(permission) && isTrustedSender(url, SERVER_URL);
   ses.setPermissionRequestHandler((_wc, permission, cb, details) => {
     const ok = mayUse(permission, details && details.requestingUrl, details);
     if (!ok) lastDisplayDenial = `permission "${permission}" refused for ${String((details && details.requestingUrl) || 'unknown')}`.slice(0, 200);

@@ -140,7 +140,7 @@
   }
 
   // ---------- top bar ----------
-  const TITLES = { remoteHubPanel: 'Remote Connection', clientDashboardPanel: 'Tickets', vendorDashboardPanel: 'My Tasks', boardsPanel: 'Boards', analyticsPanel: 'Analytics', settingsPanel: 'Settings & Billing', sessionMonitorPanel: 'Remote Desktop' };
+  const TITLES = { messagesPanel: 'Messages', remoteHubPanel: 'Remote Connection', clientDashboardPanel: 'Tickets', vendorDashboardPanel: 'My Tasks', boardsPanel: 'Boards', analyticsPanel: 'Analytics', settingsPanel: 'Settings & Billing', sessionMonitorPanel: 'Remote Desktop' };
   const PLAN_LABEL = { trial: 'Free trial', free: 'Free', member: 'Member', legacy: 'All features' };
   function renderTopbar() {
     const u = deps && deps.getUser();
@@ -227,6 +227,7 @@
     if (live) {
       actions.append(btn(sharing ? 'Change what I share' : (mode === 'window' ? 'Share a window' : 'Share my screen'), 'btn-accent', deps.openShareDialog));
       if (lt.canControl && sharing) actions.append(btn(lt.controlLabel || 'Start remote control', 'btn-ghost-dark', deps.toggleRemoteControl));
+      if (window.ScopeDeskMessages) actions.append(btn('Message vendor', 'btn-ghost-dark', () => ScopeDeskMessages.open(live.taskId)));
       actions.append(btn('Terminate Session Now', 'btn-danger hub-kill', () => { if (confirm('End the session now? The vendor is disconnected immediately.')) deps.terminateLive(); }));
     } else {
       actions.append(btn('Go to tickets', 'btn-ghost-dark', () => deps.route('overview-panel')), btn('+ New support task', 'btn-accent', deps.openNewTask));
@@ -580,7 +581,7 @@
     const mod = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘' : 'Ctrl';
     const sc = (keys, text) => h('li', {}, h('span', { class: 'keys' }, keys.map((k) => h('kbd', { text: k }))), h('span', { text }));
     $('setShortcuts').replaceChildren(h('ul', { class: 'shortcuts' },
-      sc([mod, 'K'], 'Search and commands'), sc(['T'], 'Switch light / dark mode'), sc(['G', 'R'], 'Go to Remote Connection'), sc(['G', 'T'], 'Go to Tickets'), sc(['G', 'B'], 'Go to Boards'),
+      sc([mod, 'K'], 'Search and commands'), sc(['T'], 'Switch light / dark mode'), sc(['G', 'R'], 'Go to Remote Connection'), sc(['G', 'M'], 'Go to Messages'), sc(['G', 'T'], 'Go to Tickets'), sc(['G', 'B'], 'Go to Boards'),
       sc(['G', 'A'], 'Go to Analytics'), sc(['G', 'S'], 'Go to Settings & Billing'), sc(['N'], 'New support task (clients)'), sc(['Esc'], 'Close a dialog or the assistant')));
   }
 
@@ -589,6 +590,7 @@
   function commands() {
     const list = [
       { group: 'Go to', label: isClient() ? 'Tickets' : 'My Tasks', icon: 'ticket', run: () => deps.route('overview-panel') },
+      { group: 'Go to', label: 'Messages', icon: 'ticket', run: () => deps.route('messagesPanel') },
       { group: 'Go to', label: 'Boards', icon: 'board', run: () => deps.route('boardsPanel') },
       { group: 'Go to', label: 'Analytics', icon: 'chart', run: () => deps.route('analyticsPanel') },
       { group: 'Go to', label: isClient() ? 'Settings & Billing' : 'Settings', icon: 'settings', run: () => deps.route('settingsPanel') }
@@ -608,6 +610,10 @@
     }
     list.push({ group: 'Actions', label: 'Add a card to my board', icon: 'board', run: () => { deps.route('boardsPanel'); setTimeout(() => $('boardAddTitle').focus(), 50); } });
     list.push({ group: 'Actions', label: 'Sign out', icon: 'logout', run: deps.logout });
+    if (window.ScopeDeskMessages) tasks().filter((t) => t.status === 'pending' || t.status === 'active').slice(0, 10).forEach((t) => {
+      list.push({ group: 'Messages', label: `Message ${counterparty(t)}`, sub: t.title, icon: 'ticket', search: `message chat text call ${counterparty(t)} ${t.title}`, run: () => ScopeDeskMessages.open(t.id) });
+      list.push({ group: 'Messages', label: `Call ${counterparty(t)}`, sub: t.title, icon: 'monitor', search: `call phone voice ${counterparty(t)} ${t.title}`, run: () => ScopeDeskMessages.call(t.id) });
+    });
     tasks().slice(0, 200).forEach((t) => {
       const st = STATUS[t.status] || { label: t.status };
       list.push({ group: isClient() ? 'Tickets' : 'Tasks', label: t.title, sub: `${counterparty(t)} · ${st.label}${t.token ? ' · ' + t.token : ''}`, icon: 'ticket', search: `${t.title} ${counterparty(t)} ${t.token || ''} ${st.label} ${appsOf(t).join(' ')}`, run: () => (t.status === 'active' && !isClient() ? deps.openSession() : deps.route('overview-panel')) });
@@ -628,7 +634,8 @@
     const q = $('cmdkInput').value.trim().toLowerCase();
     const all = commands().map((it) => ({ it, sc: score(it, q) })).filter((x) => x.sc > 0);
     if (!q) { all.forEach((x) => { if (x.it.group === 'Tickets' || x.it.group === 'Tasks') x.keep = false; }); }
-    let shown = all.filter((x) => q || (x.it.group !== 'Tickets' && x.it.group !== 'Tasks'));
+    const searchOnly = (g) => g === 'Tickets' || g === 'Tasks' || g === 'Messages';   // shown once you type
+    let shown = all.filter((x) => q || !searchOnly(x.it.group));
     if (!q) shown = shown.concat(all.filter((x) => x.it.group === 'Tickets' || x.it.group === 'Tasks').slice(0, 5));
     shown.sort((a, b) => (q ? b.sc - a.sc : 0));
     cmdItems = shown.slice(0, 40).map((x) => x.it);
@@ -686,7 +693,7 @@
     const k = e.key.toLowerCase();
     if (gPressed && Date.now() - gPressed < 1200) {
       gPressed = 0;
-      const to = { r: isClient() ? 'remoteHubPanel' : null, t: 'overview-panel', b: 'boardsPanel', a: 'analyticsPanel', s: 'settingsPanel' }[k];
+      const to = { r: isClient() ? 'remoteHubPanel' : null, m: 'messagesPanel', t: 'overview-panel', b: 'boardsPanel', a: 'analyticsPanel', s: 'settingsPanel' }[k];
       if (to) { e.preventDefault(); deps.route(to); }
       return;
     }

@@ -33,6 +33,7 @@ const { buildRtcConfig, relayConfigured, describeIceSetup } = require('./server/
 const { loadJwtSecret, buildOriginChecker } = require('./server/net-config');
 const { createBilling } = require('./server/billing');
 const { createAssistant } = require('./server/assistant');
+const { createConversations } = require('./server/conversations');
 
 const app = express();
 const server = http.createServer(app);
@@ -55,7 +56,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const BUILD = '2026-11-05-v15'; // shown on the page so you can tell which version you are looking at
+const BUILD = '2026-11-06-v16'; // shown on the page so you can tell which version you are looking at
 const APP_URL = (process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`)).replace(/\/+$/, '');
 if (IS_PRODUCTION) app.set('trust proxy', 1); // behind Railway's proxy: real client IPs for rate limits
 
@@ -273,6 +274,7 @@ async function terminateTask(taskId, { reason, message, actorId, finalStatus = '
   const flip = await db.run("UPDATE tasks SET status = ?, token_revoked = 1 WHERE id = ? AND status IN ('pending', 'active')", [finalStatus, taskId]);
   if (!flip.changes) {
     await db.run('UPDATE tasks SET token_revoked = 1 WHERE id = ?', [taskId]);
+    conversations.endCallsForTask(taskId, 'session-ended');
     timers.cancel(taskId);
     remoteControl.teardown(taskId, reason);
     cutStream(taskId, reason, message);
@@ -283,6 +285,7 @@ async function terminateTask(taskId, { reason, message, actorId, finalStatus = '
   await db.run("UPDATE remote_sessions SET status = ?, ended_at = ?, end_reason = ? WHERE task_id = ? AND status = 'active'",
     [sessionStatus, now, reason, taskId]);
   // Teardown FIRST: nothing the vendor sends after this line reaches the Client's PC
+  conversations.endCallsForTask(taskId, 'session-ended');
   timers.cancel(taskId);
   remoteControl.teardown(taskId, reason);   // input stops, host agent sockets drop, per-task memory is released
   cutStream(taskId, reason, message);        // both browsers close their WebRTC connection; the stream room is emptied
@@ -361,6 +364,9 @@ const remoteControl = createRemoteControl({
   onControlChange: ({ taskId, userId, active, reason }) => logAudit(userId, active ? 'REMOTE_CONTROL_STARTED' : 'REMOTE_CONTROL_STOPPED', { taskId, reason }),
   onAudit: (userId, action, details) => logAudit(userId, action, details)
 });
+
+// Client <-> vendor messages and voice calls, per ticket (server/conversations.js)
+const conversations = createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate, logAudit });
 
 // Set AUTO_CUT_STREAM=false in .env to keep the stream alive until the Client presses "Terminate Session Now".
 // Default: a violation locks the vendor out for good and the Client can only terminate. Set ALLOW_RESUME_AFTER_VIOLATION=true to let the Client resume.
@@ -503,6 +509,7 @@ io.on('connection', (socket) => {
   }
   addSocket(user.userId, socket.id);
   remoteControl.registerBrowser(socket, user);
+  conversations.registerBrowser(socket, user);
 
   const respond = (ack, body) => { if (typeof ack === 'function') ack(body); };
 
@@ -1639,6 +1646,7 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   // A completed session must close exactly like a terminated one: the host agent used to keep running (and accepting input)
   // until the original time window ran out, because nothing told it the task was over.
   timers.cancel(session.task_id);
+  conversations.endCallsForTask(session.task_id, 'session-ended');
   remoteControl.teardown(session.task_id, 'completed');
   cutStream(session.task_id, 'completed', 'Session completed.');
 
@@ -1646,6 +1654,36 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   emitToUser(session.client_id, 'session-ended', payload);
   if (session.vendor_id) emitToUser(session.vendor_id, 'session-ended', payload);
   res.json({ success: true, message: 'Session marked as completed successfully.' });
+});
+
+// ================= MESSAGES + CALLS (client <-> vendor, per ticket) =================
+app.get('/api/conversations', authenticateToken, async (req, res) => {
+  res.json({ conversations: await conversations.list(req.user), unread: await conversations.unreadTotal(req.user) });
+});
+app.get('/api/tasks/:id/messages', authenticateToken, async (req, res) => {
+  const r = await conversations.messages(req.user, req.params.id);
+  if (!r) return res.status(404).json({ error: 'Conversation not found.' });
+  const a = r.access;
+  res.json({ messages: r.messages, me: req.user.userId, taskId: a.task.id, title: a.task.title, status: a.task.status, otherName: a.otherName, canSend: a.canSend, canCall: a.canCall, why: a.why });
+});
+app.post('/api/tasks/:id/messages', authenticateToken, async (req, res) => {
+  const limitKey = `chat-send|${req.user.userId}`;
+  if (isLimited(limitKey, 40)) return res.status(429).json({ error: 'You are sending messages very quickly. Wait a moment.' });
+  recordAttempt(limitKey, 60 * 1000);
+  const r = await conversations.send(req.user, req.params.id, req.body && req.body.body);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  res.status(201).json({ message: r.message });
+});
+app.post('/api/tasks/:id/messages/read', authenticateToken, async (req, res) => {
+  const r = await conversations.markRead(req.user, req.params.id);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  res.json({ success: true, updated: r.updated });
+});
+// ICE servers for a voice call (TURN credentials for 2 hours). Only for a party of a ticket that may call right now.
+app.get('/api/calls/config', authenticateToken, async (req, res) => {
+  const a = await conversations.access(req.user, req.query.taskId);
+  if (!a || !a.canCall) return res.status(403).json({ error: (a && a.why) || 'Conversation not found.' });
+  res.json(await buildRtcConfig({ userId: req.user.userId, expiresAtMs: Date.now() + 2 * 60 * 60 * 1000 }));
 });
 
 // ================= BOARDS (personal kanban) =================

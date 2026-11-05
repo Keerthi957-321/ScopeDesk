@@ -43,7 +43,14 @@ function makeStubs() {
   const ioState = { emits: [], middleware: [], onConnection: null, server: null };
   class FakeSocket {
     constructor(id, token) { this.id = id; this.handshake = { auth: { token } }; this.data = {}; this.handlers = {}; this.rooms = new Set(); this.disconnected = false; }
-    on(ev, fn) { this.handlers[ev] = fn; }
+    // like Socket.IO: several handlers per event, all run in order (call() / handlers[ev] use them all)
+    on(ev, fn) {
+      (this.all = this.all || {});
+      (this.all[ev] = this.all[ev] || []).push(fn);
+      const list = this.all[ev];
+      this.handlers[ev] = (...args) => { let out; list.forEach((f) => { const r = f(...args); if (out === undefined) out = r; }); return out; };
+    }
+    fire(ev, ...args) { if (this.handlers[ev]) return this.handlers[ev](...args); }
     emit(ev, p) { ioState.emits.push({ to: this.id, ev, p }); }
     join(r) { this.rooms.add(r); const s = ioState.server; if (!s.sockets.adapter.rooms.has(r)) s.sockets.adapter.rooms.set(r, new Set()); s.sockets.adapter.rooms.get(r).add(this.id); }
     leave(r) { this.rooms.delete(r); const set = ioState.server.sockets.adapter.rooms.get(r); if (set) set.delete(this.id); }

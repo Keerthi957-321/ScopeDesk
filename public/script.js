@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-11-05-v15';
+window.SCOPEDESK_BUILD = '2026-11-06-v16';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -678,6 +678,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function logout(message) {
         try { ScopeDeskPlans.stop(); } catch (_) { /* not loaded */ }
         try { ScopeDeskWorkspace.stop(); } catch (_) { /* not loaded */ }
+        try { ScopeDeskMessages.stop(); } catch (_) { /* not loaded */ }
         clearLive();
         teardownRemoteConnection();
         if (STATE.socket) { STATE.socket.disconnect(); STATE.socket = null; }
@@ -712,7 +713,7 @@ document.addEventListener('DOMContentLoaded', () => {
         $('navOverviewLink').setAttribute('data-target', isClient ? 'clientDashboardPanel' : 'vendorDashboardPanel');
         $('navOverviewText').textContent = isClient ? 'Tickets' : 'My Tasks';
         // Land on Tickets (My Tasks for vendors); a page you were on before a reload (Remote Connection, Boards...) is reopened
-        const WORKSPACE_PAGES = ['boardsPanel', 'analyticsPanel', 'settingsPanel'].concat(isClient ? ['remoteHubPanel'] : []);
+        const WORKSPACE_PAGES = ['boardsPanel', 'analyticsPanel', 'settingsPanel', 'messagesPanel'].concat(isClient ? ['remoteHubPanel'] : []);
         routeToPanel(WORKSPACE_PAGES.includes(lastPanel) ? lastPanel : (isClient ? 'clientDashboardPanel' : 'vendorDashboardPanel'));
         ScopeDeskWorkspace.start();
 
@@ -720,6 +721,7 @@ document.addEventListener('DOMContentLoaded', () => {
         loadTasks().then(() => restoreVendorSession(lastPanel));
         if (isClient) loadVendors();
         if (isClient) ScopeDeskPlans.start(); else ScopeDeskPlans.stop();   // plan card + AI assistant are for clients only
+        ScopeDeskMessages.start();
     }
 
     function routeToPanel(panelId) {
@@ -735,6 +737,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (target === panelId || isOverview || isSession) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
         });
         try { ScopeDeskWorkspace.onRoute(panelId); } catch (_) { /* workspace module not loaded */ }
+        try { ScopeDeskMessages.onRoute(panelId); } catch (_) { /* messages module not loaded */ }
     }
 
     navItems.forEach((item) => {
@@ -774,6 +777,7 @@ document.addEventListener('DOMContentLoaded', () => {
         STATE.socket = socket;
         ScopeDeskStatus.attachSocket(socket);   // server up/down banner
         ScopeDeskRTC.bindSocket(socket);        // WebRTC signaling + control events
+        try { ScopeDeskMessages.bindSocket(socket); } catch (_) { /* messages module not loaded */ }   // chat + voice calls
 
         socket.on('connect_error', (err) => {
             if (err.message === 'Authentication required') {
@@ -1372,6 +1376,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     ScopeDeskPlans.init({ api, toast, loadRazorpay });
+    // Client <-> vendor messages and voice calls (messages.js)
+    ScopeDeskMessages.init({ api, toast, getUser: () => STATE.user, route: (panel) => routeToPanel(panel) });
     // Command Center, Boards, Analytics, Settings & Billing and the Ctrl/Cmd+K palette (workspace.js). It reads STATE, never writes it.
     ScopeDeskWorkspace.init({
         api, toast,

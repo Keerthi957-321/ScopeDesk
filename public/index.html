@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap">
     <link rel="stylesheet" href="style.css?v=9">
-    <link rel="stylesheet" href="theme.css?v=20261105d">
+    <link rel="stylesheet" href="theme.css?v=20261106a">
     <meta name="color-scheme" content="dark light">
     <script>
         // Theme before first paint (no flash): saved choice "light" | "dark" | "system" (default), system = follow the computer.
@@ -215,6 +215,7 @@
                 <span class="nav-group">Workspace</span>
                 <a href="#" class="nav-item active" data-target="overview-panel" id="navOverviewLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8a2 2 0 0 0 2-2h14a2 2 0 0 0 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 0-2 2H5a2 2 0 0 0-2-2v-2a2 2 0 0 0 0-4z"/><path d="M13 6v2M13 11v2M13 16v2"/></svg><span id="navOverviewText">Tickets</span><kbd class="nav-kbd">G T</kbd></a>
                 <a href="#" class="nav-item" data-target="remoteHubPanel" id="navRemoteLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M9 10l2 2 4-4"/></svg><span>Remote Connection</span><kbd class="nav-kbd">G R</kbd></a>
+                <a href="#" class="nav-item" data-target="messagesPanel" id="navMessagesLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span>Messages</span><span class="nav-badge hidden" id="navMsgBadge" aria-label="unread messages">0</span><kbd class="nav-kbd">G M</kbd></a>
                 <a href="#" class="nav-item" data-target="boardsPanel" id="navBoardsLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18"/></svg><span>Boards</span><kbd class="nav-kbd">G B</kbd></a>
                 <a href="#" class="nav-item" data-target="analyticsPanel" id="navAnalyticsLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg><span>Analytics</span><kbd class="nav-kbd">G A</kbd></a>
                 <a href="#" class="nav-item" data-target="session-panel" id="navSessionLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Remote Desktop</span></a>
@@ -520,6 +521,43 @@
                 </section>
             </div>
 
+
+            <!-- ================= MESSAGES (messages.js): client <-> vendor chat and voice calls, per ticket ================= -->
+            <div id="messagesPanel" class="pane-view hidden" data-title="Messages">
+                <header class="page-head">
+                    <div>
+                        <p class="eyebrow">Talk to your <span id="msgOtherRole">vendor</span></p>
+                        <h1 class="page-title">Messages</h1>
+                        <p class="page-sub">One conversation per ticket. Text any time while the ticket is open (and for 7 days after), or call while it is waiting or live.</p>
+                    </div>
+                </header>
+                <div class="msg-layout">
+                    <aside class="msg-list-col" aria-label="Conversations">
+                        <div class="msg-search"><input type="search" id="msgFilter" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off"></div>
+                        <ul class="msg-list" id="msgList" role="listbox" aria-label="Conversations"></ul>
+                    </aside>
+                    <section class="msg-thread" id="msgThread" aria-label="Conversation">
+                        <div class="msg-empty" id="msgEmpty">
+                            <div class="msg-empty-ico" aria-hidden="true"><svg class="msg-empty-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></div>
+                            <h2>Pick a conversation</h2>
+                            <p class="muted">Every ticket has its own chat between you and the <span id="msgEmptyOther">vendor</span>.</p>
+                        </div>
+                        <header class="msg-head hidden" id="msgHead">
+                            <button type="button" class="icon-btn msg-back" id="msgBack" aria-label="Back to conversations"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+                            <div class="msg-avatar" id="msgAvatar" aria-hidden="true">V</div>
+                            <div class="msg-head-text"><h2 id="msgName">-</h2><p id="msgSub" class="muted">-</p></div>
+                            <button type="button" class="btn-call" id="msgCallBtn" aria-label="Voice call"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg><span>Call</span></button>
+                        </header>
+                        <ol class="msg-items hidden" id="msgItems" aria-live="polite"></ol>
+                        <form class="msg-compose hidden" id="msgCompose" autocomplete="off">
+                            <textarea id="msgInput" rows="1" maxlength="2000" placeholder="Write a message..." aria-label="Message"></textarea>
+                            <button type="submit" class="chat-send" id="msgSend" aria-label="Send">&#10148;</button>
+                        </form>
+                        <p class="msg-closed hidden" id="msgClosed" role="note"></p>
+                    </section>
+                </div>
+            </div>
+
             <!-- ================= BOARDS (workspace.js) ================= -->
             <div id="boardsPanel" class="pane-view hidden" data-title="Boards">
                 <header class="page-head">
@@ -752,6 +790,28 @@
         </div>
     </div>
 
+
+    <!-- ================= VOICE CALLS (messages.js) ================= -->
+    <div class="call-incoming hidden" id="callIncoming" role="alertdialog" aria-labelledby="callInName" aria-describedby="callInSub">
+        <div class="call-pulse" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></div>
+        <div class="call-in-text">
+            <p class="call-kicker">Incoming voice call</p>
+            <h3 id="callInName">-</h3>
+            <p id="callInSub" class="muted">-</p>
+        </div>
+        <div class="call-in-actions">
+            <button type="button" class="call-btn decline" id="callDecline" aria-label="Decline call"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
+            <button type="button" class="call-btn accept" id="callAccept" aria-label="Accept call"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
+        </div>
+    </div>
+    <div class="call-bar hidden" id="callBar" role="status" aria-live="polite">
+        <span class="call-bar-dot" aria-hidden="true"></span>
+        <div class="call-bar-text"><strong id="callBarName">-</strong><span id="callBarState">Calling...</span></div>
+        <button type="button" class="call-round" id="callMute" aria-pressed="false" aria-label="Mute microphone" title="Mute"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"/><path class="mute-slash" d="M3 3l18 18"/></svg></button>
+        <button type="button" class="call-round end" id="callEnd" aria-label="Hang up" title="Hang up"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
+        <audio id="callAudio" autoplay playsinline></audio>
+    </div>
+
     <!-- ================= COMMAND PALETTE (Ctrl/Cmd + K) ================= -->
     <div class="cmdk-overlay hidden" id="cmdk" role="dialog" aria-modal="true" aria-label="Search and commands">
         <div class="cmdk">
@@ -866,8 +926,9 @@
     <script src="webrtc.js?v=20261105a"></script>
     <script src="desktop-bridge.js?v=20261105a"></script>
     <script src="membership.js?v=20261105c"></script>
-    <script src="workspace.js?v=20261105d"></script>
-    <script src="script.js?v=20261105v15"></script>
-    <script src="build-check.js?v=20261105v15"></script>
+    <script src="messages.js?v=20261106a"></script>
+    <script src="workspace.js?v=20261106a"></script>
+    <script src="script.js?v=20261106v16"></script>
+    <script src="build-check.js?v=20261106v16"></script>
 </body>
 </html>

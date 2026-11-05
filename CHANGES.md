@@ -1,3 +1,15 @@
+# Update 16 (build 2026-11-06-v16): client <-> vendor messages and voice calls
+
+| Change | Files |
+|---|---|
+| NEW Messages page (both roles): one conversation per ticket between its client and its vendor, live delivery, unread badge in the menu, "Seen", search, call records ("Voice call 4:12", "Missed voice call") | `public/messages.js`, `public/index.html`, `public/theme.css` |
+| NEW voice calls (WebRTC audio, peer to peer, through the same STUN/TURN relay as screen sharing): ring with Accept / Decline, call bar with timer, mute, hang up; one call at a time; a second tab stops ringing when one answers | `public/messages.js`, `server/conversations.js` |
+| Rules, checked on the server for every message and every call signal: only the ticket's client and its assigned vendor; texting while the ticket is waiting / live and for 7 days after; calls only while waiting / live; a blocked vendor can do neither; signals are relayed only between the two sockets of an answered call | `server/conversations.js`, `server.js`, `db.js` (`task_messages`) |
+| The kill switch, expiry and completion hang up the ticket's call at once | `server.js` |
+| Entry points: "Message vendor" on Remote Connection, G then M, Ctrl+K "Message ..." / "Call ..." | `public/workspace.js` |
+| Desktop app: the microphone is allowed for the trusted ScopeDesk page (voice calls). Needs a restarted / rebuilt desktop app | `desktop/main.js` |
+| Tests | `test/messages.test.js` (harness sockets now support several handlers per event, like Socket.IO) |
+
 # Update 15 (build 2026-11-05-v15): simpler layout, Remote Connection hub, Specific Window Only sharing
 
 | Change | Files |
