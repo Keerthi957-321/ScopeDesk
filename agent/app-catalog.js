@@ -14,7 +14,7 @@ const CATALOG = [
   { name: 'File Manager',      processes: ['explorer', 'file explorer', 'files', 'finder', 'nautilus', 'dolphin', 'thunar', 'nemo'] },
   { name: 'Notepad',           processes: ['notepad'] },
   { name: 'Notepad++',         processes: ['notepad++'] },
-  { name: 'Calculator',        processes: ['calculator', 'calculatorapp', 'calc'] },
+  { name: 'Calculator',        processes: ['calculator', 'calculatorapp', 'calc', 'gnome-calculator', 'org.gnome.calculator', 'kcalc', 'galculator'] },
   { name: 'Paint',             processes: ['mspaint', 'paint'] },
   { name: 'WordPad',           processes: ['wordpad'] },
   { name: 'Snipping Tool',     processes: ['snippingtool', 'screenclippinghost'] },

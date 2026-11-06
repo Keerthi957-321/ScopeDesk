@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap">
     <link rel="stylesheet" href="style.css?v=9">
-    <link rel="stylesheet" href="theme.css?v=20261106v17">
+    <link rel="stylesheet" href="theme.css?v=20261106v18">
     <meta name="color-scheme" content="dark light">
     <script>
         // Theme before first paint (no flash): saved choice "light" | "dark" | "system" (default), system = follow the computer.
@@ -216,7 +216,7 @@
                 <a href="#" class="nav-item active" data-target="overview-panel" id="navOverviewLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8a2 2 0 0 0 2-2h14a2 2 0 0 0 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 0-2 2H5a2 2 0 0 0-2-2v-2a2 2 0 0 0 0-4z"/><path d="M13 6v2M13 11v2M13 16v2"/></svg><span id="navOverviewText">Tickets</span><kbd class="nav-kbd">G T</kbd></a>
                 <a href="#" class="nav-item" data-target="remoteHubPanel" id="navRemoteLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M9 10l2 2 4-4"/></svg><span>Remote Connection</span><kbd class="nav-kbd">G R</kbd></a>
                 <a href="#" class="nav-item" data-target="messagesPanel" id="navMessagesLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span>Messages</span><span class="nav-badge hidden" id="navMsgBadge" aria-label="unread messages">0</span><kbd class="nav-kbd">G M</kbd></a>
-                <a href="#" class="nav-item" data-target="boardsPanel" id="navBoardsLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18"/></svg><span>Boards</span><kbd class="nav-kbd">G B</kbd></a>
+                <a href="#" class="nav-item" data-target="workspacePanel" id="navWorkspaceLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="5" rx="2"/><rect x="13" y="10" width="8" height="11" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/></svg><span>Workspace</span><kbd class="nav-kbd">G W</kbd></a>
                 <a href="#" class="nav-item" data-target="analyticsPanel" id="navAnalyticsLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg><span>Analytics</span><kbd class="nav-kbd">G A</kbd></a>
                 <a href="#" class="nav-item" data-target="session-panel" id="navSessionLink"><svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Remote Desktop</span></a>
                 <span class="nav-group">Account</span>
@@ -426,6 +426,7 @@
                         <div class="emulator-footer-controls">
                             <span class="text-green" id="emulatorStatusBadge">Connecting...</span>
                             <button id="btnOpenViewport" type="button" class="btn-ghost">Open full-screen workspace</button>
+                            <button id="btnRequestAccess" type="button" class="btn-ghost hidden" title="Ask the client for more apps or folders. Nothing changes unless they approve.">&#128273; Request additional access</button>
                             <button id="btnEndSession" class="btn-danger">End Session</button>
                         </div>
                         <div class="emulator-footer-controls" style="gap:8px">
@@ -436,6 +437,11 @@
 
                     <!-- Side Boundary Context Summary Rule Cards -->
                     <div class="emulator-meta-sidebar">
+                        <div class="meta-section control-check" id="controlCheck" aria-live="polite">
+                            <h4>Control check</h4>
+                            <ul class="cc-list" id="controlCheckList"><li class="cc-item cc-wait"><span class="cc-ico" aria-hidden="true"></span><div><strong>Waiting for the session</strong></div></li></ul>
+                            <button type="button" class="btn-link" id="btnCopyCheck" title="Copy this check as text, to send to support">Copy report</button>
+                        </div>
                         <div class="meta-section">
                             <h4>Session Bounds Signature</h4>
                             <div class="scope-meta-item"><strong>Assigned Operations Scope:</strong> <span id="lblScopeTask">None Active</span></div>
@@ -547,6 +553,7 @@
                             <div class="msg-avatar" id="msgAvatar" aria-hidden="true">V</div>
                             <div class="msg-head-text"><h2><span id="msgName">-</span><span class="msg-trust-chip hidden" id="msgTrustChip" title="This pair can text and call any time, even with no active task">&#9733; Always-On Access Approved</span></h2><p id="msgSub" class="muted">-</p></div>
                             <button type="button" class="msg-trust-toggle hidden" id="msgTrustBtn" role="switch" aria-checked="false" title="VIP: let this vendor text and call you any time, not only during an active task"><span class="msg-trust-track" aria-hidden="true"></span><span>Always-On Access</span></button>
+                            <button type="button" class="btn-call btn-video" id="msgVideoBtn" aria-label="Video call" title="Video call"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l6-3v10l-6-3z"/></svg><span>Video</span></button>
                             <button type="button" class="btn-call" id="msgCallBtn" aria-label="Voice call"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg><span>Call</span></button>
                         </header>
                         <ol class="msg-items hidden" id="msgItems" aria-live="polite"></ol>
@@ -560,55 +567,32 @@
                 </div>
             </div>
 
-            <!-- ================= BOARDS (workspace.js) ================= -->
-            <div id="boardsPanel" class="pane-view hidden" data-title="Boards">
+            <!-- ================= WORKSPACE: groups of tickets shared by client and vendor (workspace.js) ================= -->
+            <div id="workspacePanel" class="pane-view hidden" data-title="Workspace">
                 <header class="page-head">
                     <div>
-                        <p class="eyebrow">Your follow-ups</p>
-                        <h1 class="page-title">Boards</h1>
-                        <p class="page-sub" id="boardSub">A simple to-do list for the things around your support work: what to check, who to call, what is done. Only you can see it.</p>
+                        <p class="eyebrow">Projects &amp; groups</p>
+                        <h1 class="page-title">Workspace</h1>
+                        <p class="page-sub" id="wsSub">Your tickets grouped by project. You and your vendors see, live, what is being worked on in each group.</p>
                     </div>
                     <div class="page-actions">
-                        <div class="seg" role="tablist" aria-label="Board view">
-                            <button type="button" role="tab" class="seg-btn active" data-view="kanban" aria-selected="true">Board</button>
-                            <button type="button" role="tab" class="seg-btn" data-view="list" aria-selected="false">List</button>
-                        </div>
+                        <div class="ws-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="search" id="wsSearch" placeholder="Find a ticket" aria-label="Find a ticket" autocomplete="off"></div>
+                        <label class="board-toggle ws-toggle"><input type="checkbox" id="wsHideEnded"><span>Hide finished</span></label>
+                        <button type="button" class="btn-accent" id="wsNewGroup">+ New group</button>
                     </div>
                 </header>
-                <form class="board-add" id="boardAddForm" autocomplete="off">
-                    <span class="board-add-plus" aria-hidden="true">+</span>
-                    <input type="text" id="boardAddTitle" maxlength="140" placeholder="What do you need to remember? e.g. Check the invoice export after the fix" aria-label="New card title">
-                    <select id="boardAddTicket" aria-label="Link to a ticket (optional)"><option value="">No ticket</option></select>
-                    <select id="boardAddPriority" aria-label="Priority"><option value="normal">Normal</option><option value="high">High priority</option><option value="low">Low priority</option></select>
-                    <button type="submit" class="btn-accent">Add card</button>
-                </form>
-                <div class="board-tools hidden" id="boardTools" role="search" aria-label="Filter cards">
-                    <div class="board-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="search" id="boardSearch" placeholder="Filter cards" aria-label="Filter cards by text" autocomplete="off"></div>
-                    <select id="boardFilterPrio" aria-label="Filter by priority"><option value="">Any priority</option><option value="high">High only</option><option value="normal">Normal only</option><option value="low">Low only</option></select>
-                    <select id="boardFilterTicket" aria-label="Filter by ticket"><option value="">All tickets</option></select>
-                    <label class="board-toggle"><input type="checkbox" id="boardHideDone"><span>Hide done</span></label>
-                    <span class="board-count" id="boardCount" aria-live="polite"></span>
-                    <button type="button" class="btn-link hidden" id="boardClearFilters">Clear filters</button>
-                    <span class="board-keys muted" title="Keyboard">Tip: select a card, then &larr; &rarr; to move, Space to tick, Enter to rename</span>
-                </div>
-                <div class="board-undo hidden" id="boardUndo" role="status"><span id="boardUndoText"></span><button type="button" class="btn-link" id="boardUndoBtn">Undo</button></div>
-                <section class="board-welcome hidden" id="boardWelcome" aria-labelledby="boardWelcomeTitle">
-                    <div class="board-welcome-text">
-                        <h2 id="boardWelcomeTitle">Keep track of your support follow-ups</h2>
-                        <p class="muted" id="boardWelcomeSub">Write down what you need to do around a ticket, move it along as you work, and tick it off when it is done.</p>
-                        <ol class="board-steps">
-                            <li><span>1</span><div><strong>Add a card</strong><small>Type it above and press Enter. Link it to a ticket if you like.</small></div></li>
-                            <li><span>2</span><div><strong>Move it along</strong><small>Drag it to "In progress" when you start.</small></div></li>
-                            <li><span>3</span><div><strong>Tick it off</strong><small>Click the circle and it moves to "Done".</small></div></li>
-                        </ol>
-                    </div>
-                    <div class="board-starters">
-                        <p class="board-starters-label">Start with one of these</p>
-                        <div class="board-starter-list" id="boardStarters"></div>
-                    </div>
+                <div class="ws-summary" id="wsSummary" aria-live="polite"></div>
+                <section class="ws-now hidden" id="wsNow" aria-labelledby="wsNowTitle">
+                    <h2 id="wsNowTitle"><span class="ws-live-dot" aria-hidden="true"></span>Being worked on now</h2>
+                    <div class="ws-now-list" id="wsNowList"></div>
                 </section>
-                <div id="boardKanban" class="kanban"></div>
-                <div id="boardList" class="board-list hidden"></div>
+                <form class="ws-new hidden" id="wsNewForm" autocomplete="off">
+                    <input type="text" id="wsNewName" maxlength="60" placeholder="Group name, e.g. Accounts, Office network, Payroll" aria-label="Group name">
+                    <div class="ws-colors" id="wsNewColors" role="radiogroup" aria-label="Colour"></div>
+                    <button type="submit" class="btn-accent small">Create</button>
+                    <button type="button" class="btn-ghost small" id="wsNewCancel">Cancel</button>
+                </form>
+                <div class="ws-grid" id="wsGrid"></div>
             </div>
 
             <!-- ================= ANALYTICS (workspace.js) ================= -->
@@ -824,12 +808,14 @@
     <div class="call-incoming hidden" id="callIncoming" role="alertdialog" aria-labelledby="callInName" aria-describedby="callInSub">
         <div class="call-pulse" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></div>
         <div class="call-in-text">
-            <p class="call-kicker">Incoming voice call</p>
+            <p class="call-kicker" id="callInKicker">Incoming voice call</p>
             <h3 id="callInName">-</h3>
             <p id="callInSub" class="muted">-</p>
+            <label class="call-in-auto hidden" id="callInAutoRow"><input type="checkbox" id="callInAuto"> Answer this vendor's calls automatically (audio only)</label>
         </div>
         <div class="call-in-actions">
             <button type="button" class="call-btn decline" id="callDecline" aria-label="Decline call"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
+            <button type="button" class="call-btn accept video hidden" id="callAcceptVideo" aria-label="Accept with video" title="Accept with video"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l6-3v10l-6-3z"/></svg></button>
             <button type="button" class="call-btn accept" id="callAccept" aria-label="Accept call"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
         </div>
     </div>
@@ -837,8 +823,14 @@
         <span class="call-bar-dot" aria-hidden="true"></span>
         <div class="call-bar-text"><strong id="callBarName">-</strong><span id="callBarState">Calling...</span></div>
         <button type="button" class="call-round" id="callMute" aria-pressed="false" aria-label="Mute microphone" title="Mute"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"/><path class="mute-slash" d="M3 3l18 18"/></svg></button>
+        <button type="button" class="call-round" id="callCam" aria-pressed="false" aria-label="Turn camera on" title="Camera"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l6-3v10l-6-3z"/></svg></button>
         <button type="button" class="call-round end" id="callEnd" aria-label="Hang up" title="Hang up"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg></button>
         <audio id="callAudio" autoplay playsinline></audio>
+    </div>
+    <div class="call-video hidden" id="callVideoWrap" aria-label="Video call">
+        <video id="callVideo" autoplay playsinline></video>
+        <p class="call-video-off" id="callVideoOff">Camera off</p>
+        <video id="callSelf" autoplay playsinline muted class="hidden"></video>
     </div>
 
     <!-- ================= COMMAND PALETTE (Ctrl/Cmd + K) ================= -->
@@ -953,12 +945,36 @@
     <script src="share-mode.js?v=20261105a"></script>
     <script src="screen-share.js?v=20261105a"></script>
     <script src="remote-input.js?v=20261031a"></script>
-    <script src="webrtc.js?v=20261105a"></script>
+    <script src="webrtc.js?v=20261106v18"></script>
     <script src="desktop-bridge.js?v=20261105a"></script>
-    <script src="membership.js?v=20261106v17"></script>
-    <script src="messages.js?v=20261106v17"></script>
-    <script src="workspace.js?v=20261106v17"></script>
-    <script src="script.js?v=20261106v17b"></script>
-    <script src="build-check.js?v=20261106v17b"></script>
+    <script src="membership.js?v=20261106v18"></script>
+    <script src="messages.js?v=20261106v18"></script>
+    <script src="access.js?v=20261106v18"></script>
+    <script src="workspace.js?v=20261106v18"></script>
+    <script src="script.js?v=20261106v18"></script>
+    <script src="build-check.js?v=20261106v18"></script>
+    <!-- Request Additional Access (access.js): vendor dialog + client approval cards -->
+    <div id="accessCards" class="access-cards" aria-live="polite"></div>
+    <div id="accessDialog" class="modal-overlay access-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="accessTitle">
+        <div class="modal-card access-modal">
+            <header class="access-modal-head"><h2 id="accessTitle">Request additional access</h2><button type="button" class="icon-btn" id="accessClose" aria-label="Close">&#10005;</button></header>
+            <p class="muted" id="accessHave"></p>
+            <div class="access-pending hidden" id="accessPending"><span class="access-spinner" aria-hidden="true"></span><span id="accessPendingText"></span><button type="button" class="btn-link" id="accessCancelPending">Cancel request</button></div>
+            <p class="access-closed hidden" id="accessClosed">This ticket has ended, so no more access can be given.</p>
+            <form id="accessForm" autocomplete="off">
+                <label class="access-label" for="accessAppSearch">Apps</label>
+                <input type="search" id="accessAppSearch" placeholder="Find an app (Excel, Chrome, Tally...)" maxlength="60">
+                <div class="access-apps" id="accessApps"></div>
+                <p class="access-picked" id="accessPicked"></p>
+                <label class="access-label" for="accessPaths">Folders (one per line, optional)</label>
+                <textarea id="accessPaths" rows="2" maxlength="1200" spellcheck="false" placeholder="C:\Billing\2026&#10;/Users/office/Invoices"></textarea>
+                <label class="access-label" for="accessReason">Why do you need it? (the client sees this)</label>
+                <textarea id="accessReason" rows="2" maxlength="300" placeholder="The invoice export opens in Excel, I need it to check the totals."></textarea>
+                <p class="access-error" id="accessError" role="alert"></p>
+                <p class="access-last muted" id="accessLast"></p>
+                <div class="access-actions"><span class="muted">Nothing changes unless the client approves.</span><button type="submit" class="btn-accent" id="accessSend">Send request</button></div>
+            </form>
+        </div>
+    </div>
 </body>
 </html>

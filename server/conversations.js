@@ -76,14 +76,21 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
     return !!r;
   }
   /** The client approves (or stops approving) a vendor as an anytime contact. Both sides' open pages are told at once. */
-  async function setTrusted(clientUser, vendorId, on) {
+  async function contact(clientId, vendorId) {
+    const r = await db.get('SELECT auto_answer FROM client_vendor_contacts WHERE client_id = ? AND vendor_user_id = ?', [clientId, vendorId]);
+    return { trusted: !!r, autoAnswer: !!(r && r.auto_answer) };
+  }
+  async function setTrusted(clientUser, vendorId, on, opts = {}) {
     const vid = Number(vendorId);
     const vendor = Number.isInteger(vid) ? await db.get("SELECT id FROM users WHERE id = ? AND role = 'vendor'", [vid]) : null;
     if (!vendor) return { status: 404, error: 'Vendor not found.' };
     // only a vendor this client actually works with (has sent a ticket to)
     const works = await db.get('SELECT 1 AS ok FROM tasks WHERE client_id = ? AND assigned_vendor_user_id = ? LIMIT 1', [clientUser.userId, vid]);
     if (!works) return { status: 404, error: 'You have no tickets with this vendor.' };
-    if (on) await db.run('INSERT OR IGNORE INTO client_vendor_contacts (client_id, vendor_user_id) VALUES (?, ?)', [clientUser.userId, vid]);
+    if (on) {
+      await db.run('INSERT OR IGNORE INTO client_vendor_contacts (client_id, vendor_user_id) VALUES (?, ?)', [clientUser.userId, vid]);
+      if (typeof opts.autoAnswer === 'boolean') await db.run('UPDATE client_vendor_contacts SET auto_answer = ? WHERE client_id = ? AND vendor_user_id = ?', [opts.autoAnswer ? 1 : 0, clientUser.userId, vid]);
+    }
     else await db.run('DELETE FROM client_vendor_contacts WHERE client_id = ? AND vendor_user_id = ?', [clientUser.userId, vid]);
     if (!on) for (const call of [...calls.values()]) {
       // contact taken back: a call on an ENDED ticket between them stops now (calls on a running ticket stay)
@@ -92,11 +99,11 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
         if (!t || !['pending', 'active'].includes(t.status)) finish(call, 'contact-removed', clientUser.userId);
       }
     }
-    const payload = { vendorId: vid, clientId: clientUser.userId, trusted: !!on };
+    const payload = { vendorId: vid, clientId: clientUser.userId, trusted: !!on, autoAnswer: on ? (await contact(clientUser.userId, vid)).autoAnswer : false };
     emitToUser(clientUser.userId, 'contact-changed', payload);
     emitToUser(vid, 'contact-changed', payload);
     logAudit(clientUser.userId, on ? 'CONTACT_APPROVED' : 'CONTACT_REMOVED', { vendorId: vid });
-    return { status: 200, trusted: !!on };
+    return { status: 200, trusted: !!on, autoAnswer: payload.autoAnswer };
   }
 
   const row = (m) => ({ id: m.id, taskId: m.task_id, senderId: m.sender_id, kind: m.kind, body: m.body, createdAt: m.created_at, readAt: m.read_at });
@@ -214,12 +221,20 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
         const call = {
           id: crypto.randomBytes(9).toString('hex'), taskId: a.task.id, title: a.task.title,
           callerId: user.userId, calleeId: a.otherId, callerSocket: socket.id, calleeSocket: null,
-          clientId: a.task.client_id, vendorId: a.task.assigned_vendor_user_id, state: 'ringing', startedAt: 0
+          clientId: a.task.client_id, vendorId: a.task.assigned_vendor_user_id, state: 'ringing', startedAt: 0, video: !!(p && p.video)
         };
+        // A vendor calling the client: a normal vendor's call is a REQUEST the client must approve. A vendor the client approved for
+        // Always-On Access rings like a phone call, and is answered by itself only if the client switched on "Answer automatically"
+        // for that vendor (audio only: the client's camera is never switched on by anyone but the client).
+        const vendorCalling = a.role === 'vendor';
+        const c = vendorCalling ? await contact(a.task.client_id, user.userId) : { trusted: false, autoAnswer: false };
         calls.set(call.id, call);
         call.ring = setTimeout(() => finish(call, 'missed'), RING_MS);
         if (call.ring.unref) call.ring.unref();
-        const reached = emitToUser(a.otherId, 'call-incoming', { callId: call.id, taskId: call.taskId, title: a.task.title, fromName: a.myName, fromRole: a.role });
+        const reached = emitToUser(a.otherId, 'call-incoming', {
+          callId: call.id, taskId: call.taskId, title: a.task.title, fromName: a.myName, fromRole: a.role, video: call.video,
+          fromId: user.userId, request: vendorCalling && !c.trusted, trusted: vendorCalling && c.trusted, autoAnswer: vendorCalling && c.trusted && c.autoAnswer
+        });
         if (!reached) { await finish(call, 'offline', user.userId); return reply(ack, { ok: false, error: `${a.otherName} is not online right now. Your call was left as a missed call.` }); }
         logAudit(user.userId, 'CALL_STARTED', { taskId: call.taskId });
         reply(ack, { ok: true, callId: call.id, otherName: a.otherName });
@@ -254,11 +269,11 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
     socket.on('call-signal', (p) => {
       const call = findCall(p && p.callId);
       if (!call || call.state !== 'active') return;
-      if (!['offer', 'answer', 'candidate'].includes(p.type)) return;
+      if (!['offer', 'answer', 'candidate', 'cam'].includes(p.type)) return;   // 'cam' = "my camera is now on/off" (instant UI)
       if (JSON.stringify(p).length > MAX_SIGNAL) return;
       const to = socket.id === call.callerSocket ? call.calleeSocket : socket.id === call.calleeSocket ? call.callerSocket : null;
       if (!to) return;
-      toSocket(to, 'call-signal', { callId: call.id, type: p.type, sdp: p.sdp, candidate: p.candidate });
+      toSocket(to, 'call-signal', { callId: call.id, type: p.type, sdp: p.sdp, candidate: p.candidate, on: p.type === 'cam' ? p.on === true : undefined });
     });
 
     socket.on('disconnect', () => {
@@ -271,7 +286,7 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
     for (const call of [...calls.values()]) if (call.taskId === Number(taskId)) finish(call, reason);
   }
 
-  return { access, list, messages, send, markRead, unreadTotal, registerBrowser, endCallsForTask, setTrusted, isTrusted, activeCalls: () => calls.size, RING_MS };
+  return { access, contact, list, messages, send, markRead, unreadTotal, registerBrowser, endCallsForTask, setTrusted, isTrusted, activeCalls: () => calls.size, RING_MS };
 }
 
 module.exports = { createConversations };

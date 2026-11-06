@@ -24,7 +24,7 @@ test('stream: pieces arrive in order even when split mid-line; [DONE] ends it; t
   const full = await a.stream([{ role: 'user', content: 'how?' }], { role: 'vendor' }, (t) => got.push(t));
   assert.deepEqual(got, ['Open ', 'Tally, ', 'then press F12.']);
   assert.equal(full, 'Open Tally, then press F12.');
-  assert.equal(sent[0].stream, true); assert.equal(sent[0].reasoning_effort, 'none');
+  assert.equal(sent[0].stream, true); assert.equal(sent[0].reasoning_effort, 'low');
   assert.equal(sent[0].messages[0].content.startsWith(VENDOR_PROMPT), true, 'vendors get the vendor prompt');
 });
 
@@ -52,6 +52,9 @@ test('speed fallbacks: a dropped connection is retried once; a model that refuse
   const pro = []; const p2 = createAssistant({ env: { GEMINI_API_KEY: 'AIzaT', GEMINI_MODEL: 'gemini-2.5-pro' }, log: quiet, fetchImpl: async (u, o) => { pro.push(JSON.parse(o.body)); return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'x' } }] }) }; } });
   await p2.reply([{ role: 'user', content: 'hi' }]);
   assert.equal(pro[0].reasoning_effort, undefined, 'only Flash gets the switch');
+  const old = []; const p3 = createAssistant({ env: { GEMINI_API_KEY: 'AIzaT', GEMINI_MODEL: 'gemini-2.5-flash' }, log: quiet, fetchImpl: async (u, o) => { old.push(JSON.parse(o.body)); return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'x' } }] }) }; } });
+  await p3.reply([{ role: 'user', content: 'hi' }]);
+  assert.equal(old[0].reasoning_effort, 'none', '2.5 models switch thinking off completely');
   assert.equal(SYSTEM_PROMPT.includes('CLIENT'), true);
 });
 
@@ -91,4 +94,16 @@ test('routes: vendors chat (status + stream), with context of their own ticket o
   assert.equal(plain.body.reply, 'Hello there.'); assert.match(seen.at(-1).messages[0].content, /talking to the client/);
   const bad = await h.call('POST', '/api/chat/stream', { user: vendor, body: { messages: [] } });
   assert.equal(bad.status, 400, 'checks run before the stream opens');
+});
+
+test('a model that is too slow is swapped once for the fastest one the key has', async () => {
+  const posts = [];
+  const a = createAssistant({ env: { GEMINI_API_KEY: 'AIzaT' }, log: quiet, fetchImpl: async (u, o) => {
+    if (o.method === 'GET') return { ok: true, status: 200, json: async () => ({ data: [{ id: 'models/gemini-3.8-flash' }, { id: 'models/gemini-3.5-flash-lite' }] }) };
+    const b = JSON.parse(o.body); posts.push(b.model);
+    if (b.model === 'gemini-flash-lite-latest') throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: `from ${b.model}` } }] }) };
+  } });
+  assert.equal(await a.reply([{ role: 'user', content: 'hi' }]), 'from gemini-3.5-flash-lite');
+  assert.deepEqual(posts, ['gemini-flash-lite-latest', 'gemini-3.5-flash-lite']);
 });

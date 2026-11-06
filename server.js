@@ -34,6 +34,8 @@ const { loadJwtSecret, buildOriginChecker } = require('./server/net-config');
 const { createBilling } = require('./server/billing');
 const { createAssistant } = require('./server/assistant');
 const { createConversations } = require('./server/conversations');
+const { createAccessRequests } = require('./server/access-requests');
+const { createWorkspace } = require('./server/workspace');
 
 const app = express();
 const server = http.createServer(app);
@@ -56,7 +58,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const BUILD = '2026-11-06-v17b'; // shown on the page so you can tell which version you are looking at
+const BUILD = '2026-11-06-v18'; // shown on the page so you can tell which version you are looking at
 const APP_URL = (process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`)).replace(/\/+$/, '');
 if (IS_PRODUCTION) app.set('trust proxy', 1); // behind Railway's proxy: real client IPs for rate limits
 
@@ -275,6 +277,7 @@ async function terminateTask(taskId, { reason, message, actorId, finalStatus = '
   if (!flip.changes) {
     await db.run('UPDATE tasks SET token_revoked = 1 WHERE id = ?', [taskId]);
     conversations.endCallsForTask(taskId, 'session-ended');
+    accessRequests.expireTask(taskId).catch(() => {});
     timers.cancel(taskId);
     remoteControl.teardown(taskId, reason);
     cutStream(taskId, reason, message);
@@ -286,6 +289,7 @@ async function terminateTask(taskId, { reason, message, actorId, finalStatus = '
     [sessionStatus, now, reason, taskId]);
   // Teardown FIRST: nothing the vendor sends after this line reaches the Client's PC
   conversations.endCallsForTask(taskId, 'session-ended');
+  accessRequests.expireTask(taskId).catch(() => {});
   timers.cancel(taskId);
   remoteControl.teardown(taskId, reason);   // input stops, host agent sockets drop, per-task memory is released
   cutStream(taskId, reason, message);        // both browsers close their WebRTC connection; the stream room is emptied
@@ -364,6 +368,16 @@ const remoteControl = createRemoteControl({
   onControlChange: ({ taskId, userId, active, reason }) => logAudit(userId, active ? 'REMOTE_CONTROL_STARTED' : 'REMOTE_CONTROL_STOPPED', { taskId, reason }),
   onAudit: (userId, action, details) => logAudit(userId, action, details)
 });
+
+// "Request Additional Access": the vendor asks for more apps/folders, only the client can approve (server/access-requests.js)
+const accessRequests = createAccessRequests({
+  db, emitToUser, logAudit,
+  sendToAgents: (taskId, ev, payload) => remoteControl.sendToAgents(taskId, ev, payload),
+  onScopeChanged: (taskId) => remoteControl.invalidateScope(taskId)
+});
+
+// Shared Workspace: projects/groups of tickets (server/workspace.js)
+const workspace = createWorkspace({ db, emitToUser, parseDbDate, logAudit });
 
 // Client <-> vendor messages and voice calls, per ticket (server/conversations.js)
 const conversations = createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate, logAudit });
@@ -1167,7 +1181,7 @@ const reportedApps = new Map(); // userId -> { at, apps: string[] }
 const REPORTED_APPS_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_REPORTED_APPS = 600;
 
-app.get('/api/apps', authenticateToken, requireRole('client'), (req, res) => {
+app.get('/api/apps', authenticateToken, (req, res) => {   // clients (task form) and vendors (Request Additional Access)
   const mine = reportedApps.get(req.user.userId);
   const fresh = mine && Date.now() - mine.at < REPORTED_APPS_TTL_MS ? mine.apps : [];
   res.json({
@@ -1363,6 +1377,21 @@ app.get('/api/billing/status', authenticateToken, requireRole('client'), async (
   });
 });
 
+// ================= REQUEST ADDITIONAL ACCESS =================
+// Vendor: POST /api/tasks/:id/access-requests { apps: [...], paths: [...], reason }    Client & vendor: GET the ticket's requests
+// Client: POST /api/access-requests/:id/approve { apps?, paths? } (partial approval) | /deny.   Vendor: POST /api/access-requests/:id/cancel
+const sendResult = (res, r) => res.status(r.status).json(r.error ? { error: r.error } : r);
+app.get('/api/tasks/:id/access-requests', authenticateToken, async (req, res) => sendResult(res, await accessRequests.list(req.user, req.params.id)));
+app.post('/api/tasks/:id/access-requests', authenticateToken, async (req, res) => {
+  const key = `access-req|${req.user.userId}`;
+  if (isLimited(key, 20)) return res.status(429).json({ error: 'Too many requests. Please wait a few minutes.' });
+  recordAttempt(key, 60 * 60 * 1000);
+  sendResult(res, await accessRequests.create(req.user, req.params.id, req.body));
+});
+app.post('/api/access-requests/:id/approve', authenticateToken, async (req, res) => sendResult(res, await accessRequests.decide(req.user, req.params.id, true, req.body || {})));
+app.post('/api/access-requests/:id/deny', authenticateToken, async (req, res) => sendResult(res, await accessRequests.decide(req.user, req.params.id, false)));
+app.post('/api/access-requests/:id/cancel', authenticateToken, async (req, res) => sendResult(res, await accessRequests.cancel(req.user, req.params.id)));
+
 // ================= AI ASSISTANT (clients by plan, vendors always) =================
 const AI_ERRORS = () => {
   const keyName = assistant.provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY';
@@ -1371,10 +1400,16 @@ const AI_ERRORS = () => {
     AI_QUOTA: 'The AI service account has run out of free usage or credit. The administrator should check the AI account.',
     AI_BUSY: 'The AI assistant is busy right now. Please try again in a minute.',
     AI_MODEL: `The AI model "${assistant.model}" is not available for this key. The administrator can set ${assistant.provider === 'gemini' ? 'GEMINI_MODEL' : 'OPENAI_MODEL'} to another model.`,
-    AI_UNREACHABLE: 'Could not reach the AI service. Please try again in a moment.'
+    AI_UNREACHABLE: 'Could not reach the AI service. Please try again in a moment.',
+    AI_KEY_FORMAT: `The AI key saved on the server has characters that are not allowed (often a shortened copy with "..." or curly quotes). Copy the key again from Google AI Studio and paste it into ${keyName} in Railway > Variables.`
   };
 };
-const aiErrorText = (code) => AI_ERRORS()[code] || 'The AI assistant could not answer right now. Please try again.';
+// the short technical reason (e.g. ENOTFOUND, timed out after 25s) is shown in brackets so it can be reported; never the key
+const aiErrorText = (code, cause) => {
+  const text = AI_ERRORS()[code] || 'The AI assistant could not answer right now. Please try again.';
+  const why = String(cause || '').replace(/[^\w .:/-]/g, '').slice(0, 80);
+  return code === 'AI_UNREACHABLE' && why ? `${text} (Reason: ${why})` : text;
+};
 
 // Facts about one ticket the user is a party of, so the assistant can draft a reply or a summary. Nothing secret (no tokens).
 async function chatContext(user, taskId) {
@@ -1426,7 +1461,9 @@ app.get('/api/chat/status', authenticateToken, async (req, res) => {
   let chatbot = role === 'vendor';
   let plan = role === 'vendor' ? 'vendor' : null;
   if (role === 'client') { const ent = await planFor(req.user.userId); chatbot = ent.chatbot; plan = ent.plan; }
-  res.json({ role, plan, chatbot, chatbotConfigured: assistant.configured, paymentsEnabled: billing.enabled, streaming: true });
+  const hl = assistant.health();
+  res.json({ role, plan, chatbot, chatbotConfigured: assistant.configured, paymentsEnabled: billing.enabled, streaming: true,
+    ai: { provider: hl.provider, model: hl.model, lastError: hl.lastError, lastOkAt: hl.lastOkAt } });
 });
 
 // One answer at once. body: { messages: [{ role: 'user'|'assistant', content }], taskId? }. Checked HERE on every message.
@@ -1437,7 +1474,7 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
     res.json({ reply: await assistant.reply(prep.messages, prep.opts) });
   } catch (err) {
     console.error('[AI] chat failed:', err.code || err.message, err.cause || '');
-    res.status(502).json({ error: aiErrorText(err.code), code: err.code || 'AI_ERROR' });
+    res.status(502).json({ error: aiErrorText(err.code, err.cause), code: err.code || 'AI_ERROR' });
   }
 });
 
@@ -1461,7 +1498,7 @@ app.post('/api/chat/stream', authenticateToken, async (req, res) => {
     send('done', { reply });
   } catch (err) {
     console.error('[AI] chat stream failed:', err.code || err.message, err.cause || '');
-    send('error', { error: aiErrorText(err.code), code: err.code || 'AI_ERROR' });
+    send('error', { error: aiErrorText(err.code, err.cause), code: err.code || 'AI_ERROR' });
   }
   res.end();
 });
@@ -1722,6 +1759,7 @@ app.post('/api/sessions/:id/complete', authenticateToken, async (req, res) => {
   // until the original time window ran out, because nothing told it the task was over.
   timers.cancel(session.task_id);
   conversations.endCallsForTask(session.task_id, 'session-ended');
+  accessRequests.expireTask(session.task_id).catch(() => {});
   remoteControl.teardown(session.task_id, 'completed');
   cutStream(session.task_id, 'completed', 'Session completed.');
 
@@ -1739,7 +1777,8 @@ app.get('/api/tasks/:id/messages', authenticateToken, async (req, res) => {
   const r = await conversations.messages(req.user, req.params.id);
   if (!r) return res.status(404).json({ error: 'Conversation not found.' });
   const a = r.access;
-  res.json({ messages: r.messages, me: req.user.userId, taskId: a.task.id, title: a.task.title, status: a.task.status, otherName: a.otherName, canSend: a.canSend, canCall: a.canCall, why: a.why, trusted: a.trusted, open: a.open, vendorId: a.vendorId, role: a.role, windowEnd: a.task.window_end || null });
+  const autoAnswer = a.role === 'client' && a.trusted ? (await conversations.contact(a.task.client_id, a.vendorId)).autoAnswer : false;
+  res.json({ autoAnswer, messages: r.messages, me: req.user.userId, taskId: a.task.id, title: a.task.title, status: a.task.status, otherName: a.otherName, canSend: a.canSend, canCall: a.canCall, why: a.why, trusted: a.trusted, open: a.open, vendorId: a.vendorId, role: a.role, windowEnd: a.task.window_end || null });
 });
 app.post('/api/tasks/:id/messages', authenticateToken, async (req, res) => {
   const limitKey = `chat-send|${req.user.userId}`;
@@ -1756,9 +1795,10 @@ app.post('/api/tasks/:id/messages/read', authenticateToken, async (req, res) => 
 });
 // "Always-On Access" (VIP): the client approves a vendor to text / call at any time (PUT) or takes it back (DELETE). Clients only.
 app.put('/api/vendors/:id/contact', authenticateToken, requireRole('client'), async (req, res) => {
-  const r = await conversations.setTrusted(req.user, req.params.id, true);
+  // body (optional): { autoAnswer: true|false } answer this vendor's calls automatically (audio only)
+  const r = await conversations.setTrusted(req.user, req.params.id, true, { autoAnswer: req.body && typeof req.body.autoAnswer === 'boolean' ? req.body.autoAnswer : undefined });
   if (r.error) return res.status(r.status).json({ error: r.error });
-  res.json({ success: true, trusted: true });
+  res.json({ success: true, trusted: true, autoAnswer: r.autoAnswer });
 });
 app.delete('/api/vendors/:id/contact', authenticateToken, requireRole('client'), async (req, res) => {
   const r = await conversations.setTrusted(req.user, req.params.id, false);
@@ -1772,60 +1812,15 @@ app.get('/api/calls/config', authenticateToken, async (req, res) => {
   res.json(await buildRtcConfig({ userId: req.user.userId, expiresAtMs: Date.now() + 2 * 60 * 60 * 1000 }));
 });
 
-// ================= BOARDS (personal kanban) =================
-// Every user has their own board. Cards are only ever read or changed by their owner (user_id from the login, never from the body).
-const BOARD_STATUSES = ['todo', 'doing', 'done'];
-const BOARD_PRIORITIES = ['low', 'normal', 'high'];
-const BOARD_MAX_ITEMS = 300;
-const cleanText = (v, max) => String(v == null ? '' : v).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').replace(/[ \t]+/g, ' ').trim().slice(0, max);
-const boardRow = (r) => ({ id: r.id, title: r.title, notes: r.notes, status: r.status, priority: r.priority, position: r.position, taskId: r.task_id, createdAt: r.created_at, updatedAt: r.updated_at });
-
-app.get('/api/board', authenticateToken, async (req, res) => {
-  const rows = await db.all('SELECT * FROM board_items WHERE user_id = ? ORDER BY status, position, id LIMIT ?', [req.user.userId, BOARD_MAX_ITEMS]);
-  res.json({ items: rows.map(boardRow) });
-});
-
-app.post('/api/board', authenticateToken, async (req, res) => {
-  const b = req.body || {};
-  const title = cleanText(b.title, 140);
-  if (title.length < 1) return res.status(400).json({ error: 'Give the card a title.' });
-  const status = BOARD_STATUSES.includes(b.status) ? b.status : 'todo';
-  const priority = BOARD_PRIORITIES.includes(b.priority) ? b.priority : 'normal';
-  const count = await db.get('SELECT COUNT(*) AS n FROM board_items WHERE user_id = ?', [req.user.userId]);
-  if (count.n >= BOARD_MAX_ITEMS) return res.status(400).json({ error: `A board can hold ${BOARD_MAX_ITEMS} cards. Delete some finished ones first.` });
-  // A card may point at one of the user's own tickets (never someone else's)
-  let taskId = null;
-  if (b.taskId != null && Number.isInteger(Number(b.taskId))) {
-    const t = await db.get('SELECT id FROM tasks WHERE id = ? AND (client_id = ? OR assigned_vendor_user_id = ?)', [Number(b.taskId), req.user.userId, req.user.userId]);
-    if (t) taskId = t.id;
-  }
-  const top = await db.get('SELECT MIN(position) AS p FROM board_items WHERE user_id = ? AND status = ?', [req.user.userId, status]);
-  const position = top && top.p != null ? top.p - 1 : 0;       // new cards go on top of their column
-  const r = await db.run('INSERT INTO board_items (user_id, title, notes, status, priority, position, task_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [req.user.userId, title, cleanText(b.notes, 1000), status, priority, position, taskId]);
-  res.status(201).json({ item: boardRow(await db.get('SELECT * FROM board_items WHERE id = ?', [r.lastInsertRowid])) });
-});
-
-app.patch('/api/board/:id', authenticateToken, async (req, res) => {
-  const item = await db.get('SELECT * FROM board_items WHERE id = ? AND user_id = ?', [Number(req.params.id), req.user.userId]);
-  if (!item) return res.status(404).json({ error: 'Card not found.' });
-  const b = req.body || {};
-  const next = { title: item.title, notes: item.notes, status: item.status, priority: item.priority, position: item.position };
-  if (b.title !== undefined) { const t = cleanText(b.title, 140); if (!t) return res.status(400).json({ error: 'Give the card a title.' }); next.title = t; }
-  if (b.notes !== undefined) next.notes = cleanText(b.notes, 1000);
-  if (b.status !== undefined) { if (!BOARD_STATUSES.includes(b.status)) return res.status(400).json({ error: 'Unknown column.' }); next.status = b.status; }
-  if (b.priority !== undefined) { if (!BOARD_PRIORITIES.includes(b.priority)) return res.status(400).json({ error: 'Unknown priority.' }); next.priority = b.priority; }
-  if (b.position !== undefined) { const p = Number(b.position); if (!Number.isFinite(p)) return res.status(400).json({ error: 'Invalid position.' }); next.position = p; }
-  await db.run("UPDATE board_items SET title = ?, notes = ?, status = ?, priority = ?, position = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?",
-    [next.title, next.notes, next.status, next.priority, next.position, item.id, req.user.userId]);
-  res.json({ item: boardRow(await db.get('SELECT * FROM board_items WHERE id = ?', [item.id])) });
-});
-
-app.delete('/api/board/:id', authenticateToken, async (req, res) => {
-  const r = await db.run('DELETE FROM board_items WHERE id = ? AND user_id = ?', [Number(req.params.id), req.user.userId]);
-  if (!r.changes) return res.status(404).json({ error: 'Card not found.' });
-  res.json({ success: true });
-});
+// ================= WORKSPACE (projects / groups shared by client and vendor; replaces the old Boards) =================
+// GET /api/workspace -> { projects: [{ ...group, tasks }], ungrouped, canEdit }   (vendors: only their own tickets, read-only)
+// Client: POST /api/projects { name, color?, description? } | PATCH /api/projects/:id | DELETE /api/projects/:id (tickets are kept)
+//         PUT /api/tasks/:id/project { projectId | null }
+app.get('/api/workspace', authenticateToken, async (req, res) => sendResult(res, await workspace.get(req.user)));
+app.post('/api/projects', authenticateToken, async (req, res) => sendResult(res, await workspace.create(req.user, req.body || {})));
+app.patch('/api/projects/:id', authenticateToken, async (req, res) => sendResult(res, await workspace.update(req.user, req.params.id, req.body || {})));
+app.delete('/api/projects/:id', authenticateToken, async (req, res) => sendResult(res, await workspace.remove(req.user, req.params.id)));
+app.put('/api/tasks/:id/project', authenticateToken, async (req, res) => sendResult(res, await workspace.moveTask(req.user, req.params.id, req.body && req.body.projectId)));
 
 // ================= WEBRTC CONFIG + HOST AGENT PAIRING =================
 // ICE servers for the task (TURN credentials expire exactly when the task window ends)

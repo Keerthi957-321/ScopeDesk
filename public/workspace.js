@@ -1,4 +1,4 @@
-// ScopeDesk workspace pages: Command Center, Boards, Analytics, Settings & Billing, the top bar and the Ctrl/Cmd+K palette.
+// ScopeDesk workspace pages: Workspace (projects & groups), Analytics, Settings & Billing, the top bar and the Ctrl/Cmd+K palette.
 // Reads the app's state through the functions script.js passes to init(); it never changes tickets or sessions itself.
 // Everything that comes from the server is written with textContent / DOM nodes, never as HTML.
 (function () {
@@ -10,7 +10,6 @@
   let rangeDays = 30;
   let plan = null;                  // from ScopeDeskPlans
   let currentPanel = '';
-  let boardTaskSig = '';
 
   // ---------- THEME (light / dark / match the computer) ----------
   // The choice is a per-device preference, so it lives in localStorage (guarded: it can be blocked). index.html applies it before
@@ -84,7 +83,8 @@
     shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
     check: 'M20 6L9 17l-5-5',
     plus: 'M12 5v14M5 12h14',
-    board: 'M3 3h18v18H3zM9 3v18M15 3v18',
+    board: 'M3 3h18v18H3zM9 3v18M15 3v18', workspace: 'M3 3h8v8H3zM13 3h8v5h-8zM13 10h8v11h-8zM3 13h8v8H3z',
+    message: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z', edit: 'M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z',
     chart: 'M3 3v18h18M7 15l4-4 3 3 5-6',
     spark: 'M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z',
     card: 'M2 6h20v12H2zM2 10h20',
@@ -240,393 +240,200 @@
     if (mismatch) $('hubApplyText').textContent = `You are sharing ${share.kind === 'window' ? 'one window' : 'your entire screen'} right now. Switch to ${SM().label(mode)}?`;
   }
 
-  // ---------- BOARDS ----------
-  // One state object; every change goes: update state -> render -> save to the server (in order, per card).
-  // The board never re-draws while you are typing in it or dragging a card (that used to wipe edits); it catches up right after.
-  const COLUMNS = [
-    { key: 'todo', label: 'To do', hint: 'Things to start', empty: 'Nothing waiting. Add a card with + below.' },
-    { key: 'doing', label: 'In progress', hint: 'Working on it', empty: 'Drag a card here, or press → on a card, when you start.' },
-    { key: 'done', label: 'Done', hint: 'Finished', empty: 'Tick a card and it lands here.' }
-  ];
-  const STARTERS = {
-    client: ['Check the fix works after the session', 'Send the vendor the error screenshot', 'Back up the files before the next session', 'Review what the vendor changed'],
-    vendor: ['Ask the client for the error screenshot', 'Test the fix before ending the session', 'Write a short summary of what I changed', 'Follow up with the client tomorrow']
-  };
-  const PRIORITY = { high: 'High', normal: 'Normal', low: 'Low' };
-  const PRIO_RANK = { high: 0, normal: 1, low: 2 };
-  const BOARD_PREFS = 'scopedesk_board_prefs';
-  const B = {
-    items: [], loaded: false, error: '',
-    view: 'kanban',
-    filter: { q: '', priority: '', ticket: '', hideDone: false },
-    busy: 0,                 // > 0 while the user is typing in the board or dragging: renders wait
-    dirty: false,            // a render was skipped while busy
-    dragId: null,
-    queues: new Map(),       // card id -> promise chain, so saves for one card reach the server in order
-    undo: null,              // { card, timer } after a delete
-    loadSeq: 0
-  };
-  try { const p = JSON.parse(localStorage.getItem(BOARD_PREFS) || '{}'); if (p.view === 'list' || p.view === 'kanban') B.view = p.view; if (p.filter) Object.assign(B.filter, { priority: p.filter.priority || '', hideDone: !!p.filter.hideDone }); } catch (_) { /* blocked storage: defaults */ }
-  function savePrefs() { try { localStorage.setItem(BOARD_PREFS, JSON.stringify({ view: B.view, filter: { priority: B.filter.priority, hideDone: B.filter.hideDone } })); } catch (_) { /* fine */ } }
+  // ---------- WORKSPACE (projects / groups; replaced the old Boards) ----------
+  // The server says who sees what (GET /api/workspace): the client edits, vendors only see their own tickets in the groups.
+  // Redraws are skipped while the "new group" form or a rename is open, so typing is never wiped by a live update.
+  const WS = { data: null, loaded: false, error: '', q: '', hideEnded: false, seq: 0, editing: 0, dirty: false, newColor: 'indigo', timer: null };
+  const STAGE_ORDER = { live: 0, waiting: 1, done: 2, stopped: 3, ended: 4 };
+  try { WS.hideEnded = localStorage.getItem('scopedesk_ws_hide') === '1'; } catch (_) { /* fine */ }
 
-  const ticketTitle = (id) => { const t = tasks().find((x) => x.id === id); return t ? t.title : null; };
-  const byPos = (a, b) => a.position - b.position || a.id - b.id;
-  const inCol = (status) => B.items.filter((c) => c.status === status).sort(byPos);
-  function matches(c) {
-    const f = B.filter;
-    if (f.hideDone && c.status === 'done') return false;
-    if (f.priority && c.priority !== f.priority) return false;
-    if (f.ticket === 'none' && c.taskId) return false;
-    if (f.ticket && f.ticket !== 'none' && String(c.taskId) !== f.ticket) return false;
-    if (f.q) { const hay = `${c.title} ${(c.taskId && ticketTitle(c.taskId)) || ''}`.toLowerCase(); if (!hay.includes(f.q)) return false; }
-    return true;
+  async function loadWorkspace() {
+    const seq = ++WS.seq;
+    try { const d = await deps.api('/api/workspace'); if (seq !== WS.seq) return; WS.data = d; WS.error = ''; }
+    catch (err) { if (seq !== WS.seq) return; WS.error = err.message; }
+    WS.loaded = true;
+    wsRender();
   }
-  const filtering = () => !!(B.filter.q || B.filter.priority || B.filter.ticket || B.filter.hideDone);
+  // live updates come in bursts (a ticket starts, a message, a move): one reload for the burst
+  function wsSoon() { clearTimeout(WS.timer); WS.timer = setTimeout(() => { if (running && currentPanel === 'workspacePanel') loadWorkspace(); else WS.loaded = false; }, 250); }
+  const wsHold = () => { WS.editing += 1; };
+  const wsRelease = () => { WS.editing = Math.max(0, WS.editing - 1); if (!WS.editing && WS.dirty) { WS.dirty = false; wsRender(); } };
 
-  // ----- busy guard: hold renders while typing / dragging -----
-  function holdRender() { B.busy += 1; }
-  function releaseRender() { B.busy = Math.max(0, B.busy - 1); if (!B.busy && B.dirty) { B.dirty = false; renderBoard(); } }
-  function requestRender() { if (B.busy) { B.dirty = true; return; } renderBoard(); }
+  const wsMatch = (t) => (!WS.hideEnded || t.stage === 'live' || t.stage === 'waiting')
+    && (!WS.q || `${t.title} ${t.owner} ${t.apps.join(' ')}`.toLowerCase().includes(WS.q));
+  const sortTasks = (list) => list.slice().sort((a, b) => STAGE_ORDER[a.stage] - STAGE_ORDER[b.stage] || b.id - a.id);
 
-  // ----- server sync -----
-  async function loadBoard() {
-    const seq = ++B.loadSeq;
-    try {
-      const items = (await deps.api('/api/board')).items || [];
-      if (seq !== B.loadSeq) return;                 // a newer load already answered
-      B.items = items; B.loaded = true; B.error = '';
-    } catch (err) {
-      if (seq !== B.loadSeq) return;
-      B.error = err.message; B.loaded = true;
+  function stageChip(t) {
+    const left = (t.stage === 'live' || t.stage === 'waiting') && t.minutesLeft != null ? ` · ${t.minutesLeft} min left` : '';
+    return h('span', { class: `ws-stage ws-stage-${t.stage}`, text: t.stageLabel + left });
+  }
+  function taskRow(t, editable) {
+    const row = h('div', { class: `ws-task ws-task-${t.stage}`, dataset: { id: String(t.id) } },
+      h('span', { class: `ws-dot ws-dot-${t.stage}`, 'aria-hidden': 'true' }),
+      h('div', { class: 'ws-task-main' },
+        h('strong', { class: 'ws-task-title', text: t.title }),
+        h('div', { class: 'ws-task-meta' },
+          stageChip(t),
+          h('span', { class: 'ws-owner', title: t.ownerRole === 'vendor' ? 'Vendor working on it' : 'Client', text: `${t.ownerRole === 'vendor' ? 'Vendor' : 'Client'}: ${t.owner}` }),
+          h('span', { class: 'ws-scope', title: 'Allowed in this ticket', text: `Scope: ${t.apps.join(', ') || '-'}${t.folders ? ` + ${t.folders} folder${t.folders === 1 ? '' : 's'}` : ''}` }))),
+      h('div', { class: 'ws-task-actions' },
+        h('button', { type: 'button', class: 'icon-btn', title: 'Open the conversation', 'aria-label': `Message about ${t.title}`, onclick: () => { if (window.ScopeDeskMessages) ScopeDeskMessages.open(t.id); } }, icon('message')),
+        editable ? groupPicker(t) : null));
+    return row;
+  }
+  function groupPicker(t) {
+    const projects = (WS.data && WS.data.projects) || [];
+    const sel = h('select', { class: 'mini-select ws-move', 'aria-label': `Group for ${t.title}`, title: 'Move to another group' },
+      h('option', { value: '', text: 'Not grouped', selected: !t.projectId }),
+      ...projects.map((p) => h('option', { value: String(p.id), text: p.name, selected: p.id === t.projectId })));
+    sel.addEventListener('focus', wsHold); sel.addEventListener('blur', wsRelease);
+    sel.addEventListener('change', async () => {
+      const projectId = sel.value ? Number(sel.value) : null;
+      try { await deps.api(`/api/tasks/${t.id}/project`, { method: 'PUT', body: { projectId } }); t.projectId = projectId; sel.blur(); loadWorkspace(); }
+      catch (err) { deps.toast(err.message, true); }
+    });
+    return sel;
+  }
+
+  function progress(tasks) {
+    const total = tasks.length;
+    const done = tasks.filter((t) => t.stage === 'done').length;
+    const live = tasks.filter((t) => t.stage === 'live').length;
+    const waiting = tasks.filter((t) => t.stage === 'waiting').length;
+    return { total, done, live, waiting, pct: total ? Math.round((done / total) * 100) : 0 };
+  }
+
+  function groupCard(p, editable) {
+    const all = p.tasks || [];
+    const shown = sortTasks(all.filter(wsMatch));
+    const pr = progress(all);
+    const title = h('h3', { class: 'ws-group-name', text: p.name, title: editable ? 'Double-click to rename' : '' });
+    if (editable) title.addEventListener('dblclick', () => renameGroup(p, title));
+    const card = h('section', { class: `ws-group ws-c-${p.color}${pr.live ? ' has-live' : ''}`, 'aria-label': p.name, dataset: { id: String(p.id) } },
+      h('header', { class: 'ws-group-head' },
+        h('span', { class: 'ws-swatch', 'aria-hidden': 'true' }),
+        h('div', { class: 'ws-group-title' }, title,
+          h('small', { class: 'muted', text: `${pr.total} ticket${pr.total === 1 ? '' : 's'}${pr.live ? ` · ${pr.live} live` : ''}${pr.waiting ? ` · ${pr.waiting} waiting` : ''}` })),
+        editable ? h('div', { class: 'ws-group-tools' },
+          h('button', { type: 'button', class: 'icon-btn', title: 'Change colour', 'aria-label': `Change colour of ${p.name}`, onclick: () => cycleColor(p) }, h('span', { class: 'ws-swatch small', 'aria-hidden': 'true' })),
+          h('button', { type: 'button', class: 'icon-btn', title: 'Rename', 'aria-label': `Rename ${p.name}`, onclick: () => renameGroup(p, title) }, icon('edit')),
+          h('button', { type: 'button', class: 'icon-btn danger', title: 'Delete group (tickets are kept)', 'aria-label': `Delete ${p.name}`, onclick: () => deleteGroup(p) }, icon('trash'))) : null),
+      h('div', { class: 'ws-progress', title: `${pr.pct}% done`, role: 'progressbar', 'aria-valuenow': String(pr.pct), 'aria-valuemin': '0', 'aria-valuemax': '100' }, h('span', { style: `width:${pr.pct}%` })),
+      h('div', { class: 'ws-tasks' }, shown.length ? shown.map((t) => taskRow(t, editable))
+        : h('p', { class: 'ws-empty', text: all.length ? 'Nothing matches.' : (editable ? 'No tickets yet. Move a ticket here with its group menu.' : 'No tickets of yours in this group.') })));
+    return card;
+  }
+
+  function wsRender() {
+    if (!deps || !running || currentPanel !== 'workspacePanel') return;
+    if (WS.editing) { WS.dirty = true; return; }
+    const grid = $('wsGrid');
+    const editable = !!(WS.data && WS.data.canEdit);
+    $('wsNewGroup').classList.toggle('hidden', !editable);
+    $('wsHideEnded').checked = WS.hideEnded;
+    $('wsSub').textContent = isClient()
+      ? 'Your tickets grouped by project. You and your vendors see, live, what is being worked on in each group.'
+      : 'The groups your clients made, with only your own tickets in them. You see, live, what is waiting and what is being worked on.';
+    if (!WS.loaded) { grid.replaceChildren(h('p', { class: 'muted', text: 'Loading the workspace...' })); return; }
+    if (WS.error && !WS.data) { grid.replaceChildren(h('div', { class: 'board-error' }, h('p', { text: `The workspace could not be loaded: ${WS.error}` }), h('button', { type: 'button', class: 'btn-accent small', text: 'Try again', onclick: loadWorkspace }))); return; }
+    const d = WS.data;
+    const everything = [...d.projects.flatMap((p) => p.tasks), ...d.ungrouped];
+    const pr = progress(everything);
+    $('wsSummary').replaceChildren(
+      h('span', { class: 'ws-sum ws-sum-live', text: `${pr.live} live` }),
+      h('span', { class: 'ws-sum ws-sum-waiting', text: `${pr.waiting} waiting` }),
+      h('span', { class: 'ws-sum', text: `${pr.done} done` }),
+      h('span', { class: 'ws-sum', text: `${d.projects.length} group${d.projects.length === 1 ? '' : 's'}` }));
+    // what is being worked on right now, across every group
+    const live = everything.filter((t) => t.stage === 'live' && wsMatch(t));
+    $('wsNow').classList.toggle('hidden', !live.length);
+    const groupOf = (t) => d.projects.find((p) => p.id === t.projectId);
+    $('wsNowList').replaceChildren(...live.map((t) => {
+      const g = groupOf(t);
+      return h('button', { type: 'button', class: `ws-now-card ws-c-${g ? g.color : 'slate'}`, onclick: () => { if (!isClient()) deps.openSession && deps.openSession(); else deps.route('remoteHubPanel'); } },
+        h('span', { class: 'ws-now-group', text: g ? g.name : 'Not grouped' }),
+        h('strong', { text: t.title }),
+        h('span', { class: 'muted', text: `${t.ownerRole === 'vendor' ? 'Vendor' : 'Client'}: ${t.owner} · ${t.minutesLeft != null ? t.minutesLeft + ' min left' : 'live'} · ${t.apps.join(', ')}` }));
+    }));
+    const cards = d.projects.map((p) => groupCard(p, editable));
+    if (d.ungrouped.length || !d.projects.length) {
+      cards.push(groupCard({ id: 0, name: 'Not grouped', color: 'slate', tasks: d.ungrouped }, false));
+      if (editable) {
+        // the "Not grouped" cluster still lets the client move tickets out of it
+        const last = cards[cards.length - 1];
+        last.classList.add('ws-ungrouped');
+        last.querySelector('.ws-tasks').replaceChildren(...(sortTasks(d.ungrouped.filter(wsMatch)).map((t) => taskRow(t, true))));
+        if (!d.ungrouped.length) last.querySelector('.ws-tasks').append(h('p', { class: 'ws-empty', text: 'Every ticket is in a group.' }));
+      }
     }
-    requestRender();
-  }
-  // Saves for the same card run one after another; if one fails, the board reloads from the server (the source of truth)
-  function enqueue(id, job) {
-    const prev = B.queues.get(id) || Promise.resolve();
-    const next = prev.then(job, job).catch((err) => { deps.toast(err.message, true); loadBoard(); });
-    B.queues.set(id, next);
-    next.finally(() => { if (B.queues.get(id) === next) B.queues.delete(id); });
-    return next;
-  }
-  function updateCard(card, changes) {
-    Object.assign(card, changes, { updatedAt: new Date().toISOString() });
-    requestRender();
-    return enqueue(card.id, async () => {
-      const res = await deps.api(`/api/board/${card.id}`, { method: 'PATCH', body: changes });
-      const live = B.items.find((c) => c.id === card.id);
-      if (live && res.item) { live.updatedAt = res.item.updatedAt; }   // keep local order/state; it is what we just sent
-    });
-  }
-  async function addCard(title, { status = 'todo', priority = 'normal', taskId = null, position } = {}) {
-    const res = await deps.api('/api/board', { method: 'POST', body: { title, status, priority, taskId } });
-    const item = res.item;
-    B.items.push(item);
-    if (position !== undefined) { item.position = position; enqueue(item.id, () => deps.api(`/api/board/${item.id}`, { method: 'PATCH', body: { position } })); }
-    requestRender();
-    return item;
-  }
-  function deleteCard(card) {
-    B.items = B.items.filter((c) => c !== card);
-    showUndo(card);
-    requestRender();
-    enqueue(card.id, () => deps.api(`/api/board/${card.id}`, { method: 'DELETE' }));
-  }
-  function showUndo(card) {
-    if (B.undo) clearTimeout(B.undo.timer);
-    const bar = $('boardUndo');
-    $('boardUndoText').textContent = `Deleted "${card.title.length > 48 ? card.title.slice(0, 48) + '...' : card.title}".`;
-    bar.classList.remove('hidden');
-    B.undo = { card, timer: setTimeout(hideUndo, 6000) };
-  }
-  function hideUndo() { if (B.undo) clearTimeout(B.undo.timer); B.undo = null; $('boardUndo').classList.add('hidden'); }
-  async function undoDelete() {
-    const u = B.undo; hideUndo();
-    if (!u) return;
-    const c = u.card;
-    try { await addCard(c.title, { status: c.status, priority: c.priority, taskId: c.taskId, position: c.position }); }
-    catch (err) { deps.toast(err.message, true); }
-  }
-
-  // ----- positions -----
-  // Position for a card placed before `beforeId` (or at the end) in a column. Uses neighbours that are on screen, so it
-  // works the same with or without filters. Re-numbers the column when the gaps get too small.
-  function positionBefore(status, beforeId, movingId) {
-    const list = inCol(status).filter((c) => c.id !== movingId);
-    const i = beforeId == null ? list.length : list.findIndex((c) => c.id === beforeId);
-    const at = i === -1 ? list.length : i;
-    const prev = list[at - 1], next = list[at];
-    if (!prev && !next) return 0;
-    if (!prev) return next.position - 1;
-    if (!next) return prev.position + 1;
-    if (next.position - prev.position < 1e-6) { renumber(status, movingId); return positionBefore(status, beforeId, movingId); }
-    return (prev.position + next.position) / 2;
-  }
-  function renumber(status, skipId) {
-    inCol(status).filter((c) => c.id !== skipId).forEach((c, i) => { if (c.position !== i) updateCard(c, { position: i }); });
-  }
-  function moveTo(card, status, beforeId) {
-    if (card.status === status && beforeId === card.id) return;
-    updateCard(card, { status, position: positionBefore(status, beforeId, card.id) });
-  }
-  function step(card, dir) {
-    const i = COLUMNS.findIndex((c) => c.key === card.status);
-    const to = COLUMNS[i + dir];
-    if (!to) return;
-    const first = inCol(to.key)[0];
-    moveTo(card, to.key, first ? first.id : null);
-    focusCardSoon(card.id);
-  }
-  function reorder(card, dir) {
-    const list = inCol(card.status).filter(matches);
-    const i = list.indexOf(card);
-    const j = i + dir;
-    if (i === -1 || j < 0 || j >= list.length) return;
-    const before = dir < 0 ? list[j].id : (list[j + 1] ? list[j + 1].id : null);
-    moveTo(card, card.status, before);
-    focusCardSoon(card.id);
-  }
-  function focusCardSoon(id) {
-    const go = () => { const el = document.querySelector(`.kcard[data-id="${id}"]`); if (el && document.activeElement !== el) el.focus({ preventScroll: false }); };
-    go(); requestAnimationFrame(go);                    // now (so fast key presses are not lost) and after any held render
-  }
-  function toggleDone(card, done) {
-    const to = done ? 'done' : 'todo';
-    const first = inCol(to)[0];
-    moveTo(card, to, first ? first.id : null);
-  }
-
-  // ----- inline editors (hold renders while open) -----
-  function inlineInput({ value = '', placeholder = '', label, cls, onDone }) {
-    const input = h('input', { class: cls, value, maxlength: '140', placeholder, 'aria-label': label });
-    let closed = false;
-    holdRender();
-    const finish = (save) => {
-      if (closed) return; closed = true;
-      const v = input.value.trim();
-      Promise.resolve(onDone(save ? v : null)).finally(releaseRender);
-    };
-    input.addEventListener('keydown', (e) => {
-      e.stopPropagation();                               // board shortcuts and the app's "G x" keys stay quiet while typing
-      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
-      if (e.key === 'Escape') { e.preventDefault(); finish(false); }
-    });
-    input.addEventListener('blur', () => finish(true));
-    return input;
-  }
-  function titleEl(card) {
-    const span = h('span', { class: 'card-title', text: card.title, title: 'Double-click to rename' });
-    span.addEventListener('dblclick', () => startRename(card, span));
-    return span;
-  }
-  function startRename(card, span) {
-    const input = inlineInput({ value: card.title, label: 'Card title', cls: 'card-edit', onDone: (v) => {
-      if (v && v !== card.title) updateCard(card, { title: v }); else B.dirty = true;
-    } });
-    span.replaceWith(input); input.focus(); input.select();
-  }
-
-  // ----- drawing -----
-  function cardEl(card) {
-    const done = card.status === 'done';
-    const colIndex = COLUMNS.findIndex((c) => c.key === card.status);
-    const tName = card.taskId ? ticketTitle(card.taskId) : null;
-    const el = h('article', { class: `kcard${done ? ' is-done' : ''} prio-edge-${card.priority}`, draggable: 'true', tabindex: '0', dataset: { id: String(card.id) },
-      'aria-label': `${card.title}. ${COLUMNS[colIndex].label}${card.priority !== 'normal' ? `, ${PRIORITY[card.priority]} priority` : ''}. Arrows move it, Enter renames, Delete removes.` },
-      h('div', { class: 'kcard-top' },
-        h('label', { class: 'check', title: done ? 'Mark as not done' : 'Mark as done' },
-          h('input', { type: 'checkbox', checked: done, 'aria-label': `Done: ${card.title}`, onchange: (e) => toggleDone(card, e.target.checked) }),
-          h('span', { class: 'check-box', 'aria-hidden': 'true' }, icon('check'))),
-        titleEl(card)),
-      tName ? h('button', { type: 'button', class: 'kcard-ticket', title: 'Open the ticket', onclick: () => deps.route('overview-panel') }, icon('ticket'), h('span', { text: tName })) : null,
-      h('div', { class: 'kcard-foot' },
-        h('button', { type: 'button', class: `prio prio-${card.priority} prio-btn`, title: 'Change priority', text: PRIORITY[card.priority] || card.priority,
-          onclick: () => updateCard(card, { priority: card.priority === 'normal' ? 'high' : card.priority === 'high' ? 'low' : 'normal' }) }),
-        h('span', { class: 'kcard-time', text: timeAgo(toMs(card.updatedAt)) }),
-        h('span', { class: 'kcard-tools' },
-          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Move left', title: 'Move left', disabled: colIndex === 0, onclick: () => step(card, -1) }, icon('arrowL')),
-          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Move right', title: 'Move right', disabled: colIndex === COLUMNS.length - 1, onclick: () => step(card, 1) }, icon('arrowR')),
-          h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `Delete ${card.title}`, title: 'Delete', onclick: () => deleteCard(card) }, icon('trash')))));
-    el.addEventListener('keydown', (e) => {
-      if (e.target !== el) return;
-      if (e.key === 'ArrowRight') { e.preventDefault(); step(card, 1); }
-      else if (e.key === 'ArrowLeft') { e.preventDefault(); step(card, -1); }
-      else if (e.key === 'ArrowUp' && e.altKey) { e.preventDefault(); reorder(card, -1); }
-      else if (e.key === 'ArrowDown' && e.altKey) { e.preventDefault(); reorder(card, 1); }
-      else if (e.key === 'Enter') { e.preventDefault(); const t = el.querySelector('.card-title'); if (t) startRename(card, t); }
-      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteCard(card); }
-      else if (e.key === ' ') { e.preventDefault(); toggleDone(card, card.status !== 'done'); focusCardSoon(card.id); }
-    });
-    el.addEventListener('dragstart', (e) => {
-      if (e.target !== el) return;
-      B.dragId = card.id; holdRender();
-      e.dataTransfer.setData('text/plain', String(card.id)); e.dataTransfer.effectAllowed = 'move';
-      requestAnimationFrame(() => el.classList.add('dragging'));
-    });
-    el.addEventListener('dragend', endDrag);
-    return el;
-  }
-  function endDrag() {
-    document.querySelectorAll('.kcard.dragging').forEach((c) => c.classList.remove('dragging'));
-    document.querySelectorAll('.kcol.drop').forEach((c) => c.classList.remove('drop'));
-    document.querySelectorAll('.drop-mark').forEach((m) => m.remove());
-    if (B.dragId != null) { B.dragId = null; releaseRender(); }
-  }
-  // the card the drop lands before, from the pointer height
-  function dropBefore(body, y) {
-    const cards = [...body.querySelectorAll('.kcard:not(.dragging)')];
-    const hit = cards.find((c) => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; });
-    return hit || null;
-  }
-
-  function quickAdd(col) {
-    const btn = h('button', { type: 'button', class: 'kcol-add', text: '+ Add a card' });
-    btn.addEventListener('click', () => {
-      const input = inlineInput({ placeholder: 'Card title, then Enter', label: `New card in ${col.label}`, cls: 'kcol-add-input', onDone: async (v) => {
-        B.dirty = true;
-        if (v) { try { await addCard(v, { status: col.key }); } catch (err) { deps.toast(err.message, true); } }
-      } });
-      btn.replaceWith(input); input.focus();
-    });
-    return btn;
-  }
-
-  function column(col) {
-    const all = inCol(col.key);
-    const cards = all.filter(matches);
-    const emptyText = all.length && !cards.length ? 'No cards match the filter.' : col.empty;
-    const body = h('div', { class: 'kcol-body' }, cards.length ? cards.map(cardEl) : h('p', { class: 'kcol-empty', text: emptyText }));
-    const count = filtering() && cards.length !== all.length ? `${cards.length}/${all.length}` : String(all.length);
-    const clearDone = col.key === 'done' && all.length > 1
-      ? h('button', { type: 'button', class: 'kcol-clear', title: 'Delete every card in Done', text: 'Clear', onclick: () => {
-        if (!confirm(`Delete all ${all.length} finished cards?`)) return;
-        all.forEach((c) => { B.items = B.items.filter((x) => x !== c); enqueue(c.id, () => deps.api(`/api/board/${c.id}`, { method: 'DELETE' })); });
-        requestRender();
-      } }) : null;
-    const sec = h('section', { class: `kcol kcol-${col.key}`, 'aria-label': col.label, dataset: { col: col.key } },
-      h('header', { class: 'kcol-head' }, h('span', { class: 'kcol-dot', 'aria-hidden': 'true' }),
-        h('div', { class: 'kcol-title' }, h('h3', { text: col.label }), h('small', { text: col.hint })),
-        clearDone, h('span', { class: 'kcol-count', text: count })),
-      body, quickAdd(col));
-    sec.addEventListener('dragover', (e) => {
-      if (B.dragId == null) return;
-      e.preventDefault(); e.dataTransfer.dropEffect = 'move';
-      sec.classList.add('drop');
-      let mark = body.querySelector('.drop-mark') || h('div', { class: 'drop-mark', 'aria-hidden': 'true' });
-      const before = dropBefore(body, e.clientY);
-      if (before) { if (mark.nextSibling !== before) body.insertBefore(mark, before); } else if (body.lastChild !== mark) body.appendChild(mark);
-    });
-    sec.addEventListener('dragleave', (e) => { if (!sec.contains(e.relatedTarget)) { sec.classList.remove('drop'); const m = body.querySelector('.drop-mark'); if (m) m.remove(); } });
-    sec.addEventListener('drop', (e) => {
-      e.preventDefault();
-      const id = B.dragId != null ? B.dragId : Number(e.dataTransfer.getData('text/plain'));
-      const card = B.items.find((c) => c.id === id);
-      const before = dropBefore(body, e.clientY);
-      endDrag();                                          // releases the render hold
-      if (card) moveTo(card, col.key, before ? Number(before.dataset.id) : null);
-    });
-    return sec;
-  }
-
-  function listView() {
-    const rows = COLUMNS.flatMap((c) => inCol(c.key)).filter(matches)
-      .sort((a, b) => (a.status === 'done') - (b.status === 'done') || PRIO_RANK[a.priority] - PRIO_RANK[b.priority] || byPos(a, b));
-    if (!rows.length) return h('p', { class: 'muted pad', text: B.items.length ? 'No cards match the filter.' : 'No cards yet. Add one above, or pick a starter card.' });
-    return h('table', { class: 'dtable' },
-      h('thead', {}, h('tr', {}, h('th', { text: '' }), h('th', { text: 'Card' }), h('th', { text: 'Ticket' }), h('th', { text: 'Status' }), h('th', { text: 'Priority' }), h('th', { text: 'Updated' }), h('th', { text: '' }))),
-      h('tbody', {}, rows.map((card) => h('tr', { class: card.status === 'done' ? 'is-done' : '', dataset: { id: String(card.id) } },
-        h('td', {}, h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: card.status === 'done', 'aria-label': `Done: ${card.title}`, onchange: (e) => toggleDone(card, e.target.checked) }), h('span', { class: 'check-box', 'aria-hidden': 'true' }, icon('check')))),
-        h('td', { class: 'td-title' }, titleEl(card)),
-        h('td', { class: 'muted', text: (card.taskId && ticketTitle(card.taskId)) || '-' }),
-        h('td', {}, h('select', { class: 'mini-select', 'aria-label': 'Status', onchange: (e) => moveTo(card, e.target.value, (inCol(e.target.value)[0] || {}).id ?? null) },
-          COLUMNS.map((c) => h('option', { value: c.key, selected: c.key === card.status, text: c.label })))),
-        h('td', {}, h('select', { class: 'mini-select', 'aria-label': 'Priority', onchange: (e) => updateCard(card, { priority: e.target.value }) },
-          Object.entries(PRIORITY).map(([k, v]) => h('option', { value: k, selected: k === card.priority, text: v })))),
-        h('td', { class: 'muted', text: timeAgo(toMs(card.updatedAt)) }),
-        h('td', {}, h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `Delete ${card.title}`, onclick: () => deleteCard(card) }, icon('trash')))))));
-  }
-
-  // ticket pickers (add form + filter): open tickets first
-  let pickerSig = '';
-  function fillTicketPickers() {
-    const open = (t) => (['active', 'pending'].includes(t.status) ? 1 : 0);
-    const list = tasks().slice().sort((a, b) => open(b) - open(a)).slice(0, 30);
-    const sig = list.map((t) => `${t.id}:${t.title}`).join('|');
-    if (sig === pickerSig) return;
-    pickerSig = sig;
-    const opt = (t) => h('option', { value: String(t.id), text: `${t.title.slice(0, 40)}${t.title.length > 40 ? '...' : ''}` });
-    const add = $('boardAddTicket'), flt = $('boardFilterTicket');
-    const keepA = add.value, keepF = flt.value;
-    add.replaceChildren(h('option', { value: '', text: 'No ticket' }), ...list.map(opt));
-    flt.replaceChildren(h('option', { value: '', text: 'All tickets' }), h('option', { value: 'none', text: 'Not linked' }), ...list.map(opt));
-    if ([...add.options].some((o) => o.value === keepA)) add.value = keepA;
-    if ([...flt.options].some((o) => o.value === keepF)) flt.value = keepF; else B.filter.ticket = '';
-    add.classList.toggle('hidden', list.length === 0);
-    flt.classList.toggle('hidden', list.length === 0);
-  }
-
-  function renderBoard() {
-    if (!deps || !running) return;
-    if (B.busy) { B.dirty = true; return; }
-    const kan = $('boardKanban'), list = $('boardList');
-    kan.classList.toggle('hidden', B.view !== 'kanban');
-    list.classList.toggle('hidden', B.view !== 'list');
-    document.querySelectorAll('#boardsPanel .seg-btn').forEach((x) => { const on = x.dataset.view === B.view; x.classList.toggle('active', on); x.setAttribute('aria-selected', String(on)); });
-    $('boardFilterPrio').value = B.filter.priority;
-    $('boardHideDone').checked = B.filter.hideDone;
-    fillTicketPickers();
-    if (!B.loaded) { kan.replaceChildren(h('p', { class: 'muted', text: 'Loading your board...' })); $('boardTools').classList.add('hidden'); return; }
-    if (B.error && !B.items.length) {
-      kan.replaceChildren(h('div', { class: 'board-error' }, h('p', { text: `The board could not be loaded: ${B.error}` }), h('button', { type: 'button', class: 'btn-accent small', text: 'Try again', onclick: () => { B.loaded = false; renderBoard(); loadBoard(); } })));
+    if (!everything.length && !d.projects.length) {
+      grid.replaceChildren(h('div', { class: 'ws-welcome' },
+        h('h2', { text: isClient() ? 'Group your tickets into projects' : 'Nothing here yet' }),
+        h('p', { class: 'muted', text: isClient() ? 'Create a group (for example "Accounts" or "Office network"), then move tickets into it. Your vendors see the group and the live status of their own tickets.' : 'When a client sends you a ticket it appears here, inside the client’s group.' }),
+        isClient() ? h('button', { type: 'button', class: 'btn-accent', text: '+ Create your first group', onclick: openNewGroup }) : null));
       return;
     }
-    const empty = B.items.length === 0;
-    $('boardWelcome').classList.toggle('hidden', !empty);
-    $('boardTools').classList.toggle('hidden', empty);
-    if (empty) {
-      const role = isClient() ? 'client' : 'vendor';
-      $('boardStarters').replaceChildren(...STARTERS[role].map((t) => h('button', { type: 'button', class: 'board-starter', onclick: async (e) => {
-        e.currentTarget.disabled = true;
-        try { await addCard(t); } catch (err) { deps.toast(err.message, true); e.currentTarget.disabled = false; }
-      } }, h('span', { class: 'board-starter-plus', 'aria-hidden': 'true', text: '+' }), h('span', { text: t }))));
-    }
-    const shown = B.items.filter(matches).length;
-    $('boardCount').textContent = filtering() ? `Showing ${shown} of ${B.items.length}` : `${B.items.length} card${B.items.length === 1 ? '' : 's'}`;
-    $('boardClearFilters').classList.toggle('hidden', !filtering());
-    // keep focus on the card that had it
-    const focusedId = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('kcard') ? document.activeElement.dataset.id : null;
-    if (B.view === 'kanban') kan.replaceChildren(...COLUMNS.map(column)); else list.replaceChildren(listView());
-    if (focusedId) focusCardSoon(focusedId);
+    grid.replaceChildren(...cards);
   }
 
-  function bindBoard() {
-    $('boardAddForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const input = $('boardAddTitle');
-      const title = input.value.trim();
-      if (!title) { input.focus(); return; }
-      input.value = '';
-      const ticket = $('boardAddTicket').value;
-      try {
-        await addCard(title, { priority: $('boardAddPriority').value, taskId: ticket ? Number(ticket) : null });
-        $('boardAddPriority').value = 'normal';
-      } catch (err) { input.value = title; deps.toast(err.message, true); }
-      input.focus();
-    });
-    document.querySelectorAll('#boardsPanel .seg-btn').forEach((b) => b.addEventListener('click', () => { B.view = b.dataset.view; savePrefs(); renderBoard(); }));
-    let qTimer = null;
-    $('boardSearch').addEventListener('input', (e) => { clearTimeout(qTimer); qTimer = setTimeout(() => { B.filter.q = e.target.value.trim().toLowerCase(); renderBoard(); }, 120); });
-    $('boardSearch').addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') { e.target.value = ''; B.filter.q = ''; renderBoard(); } });
-    $('boardFilterPrio').addEventListener('change', (e) => { B.filter.priority = e.target.value; savePrefs(); renderBoard(); });
-    $('boardFilterTicket').addEventListener('change', (e) => { B.filter.ticket = e.target.value; renderBoard(); });
-    $('boardHideDone').addEventListener('change', (e) => { B.filter.hideDone = e.target.checked; savePrefs(); renderBoard(); });
-    $('boardClearFilters').addEventListener('click', () => { B.filter = { q: '', priority: '', ticket: '', hideDone: false }; $('boardSearch').value = ''; $('boardFilterTicket').value = ''; savePrefs(); renderBoard(); });
-    $('boardUndoBtn').addEventListener('click', undoDelete);
-    // a drag cancelled outside the window (Esc, dropped on nothing) never leaves the board frozen
-    document.addEventListener('drop', () => { if (B.dragId != null) setTimeout(endDrag, 0); });
-    window.addEventListener('blur', () => { if (B.dragId != null) endDrag(); });
+  // ----- client edits -----
+  function colorButtons() {
+    const box = $('wsNewColors');
+    box.replaceChildren(...((WS.data && WS.data.colors) || ['indigo']).map((c) => {
+      const b = h('button', { type: 'button', class: `ws-color ws-c-${c}${c === WS.newColor ? ' on' : ''}`, role: 'radio', 'aria-checked': String(c === WS.newColor), 'aria-label': c, title: c });
+      b.addEventListener('click', () => { WS.newColor = c; colorButtons(); });
+      return b;
+    }));
   }
-  function resetBoard() { B.items = []; B.loaded = false; B.error = ''; B.busy = 0; B.dirty = false; B.dragId = null; B.queues.clear(); B.loadSeq += 1; pickerSig = ''; hideUndo(); }
+  function openNewGroup() {
+    const f = $('wsNewForm');
+    if (!f.classList.contains('hidden')) { $('wsNewName').focus(); return; }
+    f.classList.remove('hidden'); wsHold(); colorButtons(); $('wsNewName').value = ''; $('wsNewName').focus();
+  }
+  function closeNewGroup() { const f = $('wsNewForm'); if (f.classList.contains('hidden')) return; f.classList.add('hidden'); wsRelease(); }
+  async function createGroup(e) {
+    e.preventDefault();
+    const name = $('wsNewName').value.trim();
+    if (!name) { $('wsNewName').focus(); return; }
+    try { await deps.api('/api/projects', { method: 'POST', body: { name, color: WS.newColor } }); closeNewGroup(); await loadWorkspace(); deps.toast(`Group "${name}" created. Move tickets into it with their group menu.`); }
+    catch (err) { deps.toast(err.message, true); }
+  }
+  function renameGroup(p, titleEl) {
+    const input = h('input', { class: 'card-edit ws-rename', value: p.name, maxlength: '60', 'aria-label': 'Group name' });
+    let done = false;
+    wsHold();
+    const finish = async (save) => {
+      if (done) return; done = true;
+      const v = input.value.trim();
+      if (save && v && v !== p.name) { try { await deps.api(`/api/projects/${p.id}`, { method: 'PATCH', body: { name: v } }); p.name = v; } catch (err) { deps.toast(err.message, true); } }
+      WS.dirty = true; wsRelease(); loadWorkspace();
+    };
+    input.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); finish(true); } if (e.key === 'Escape') finish(false); });
+    input.addEventListener('blur', () => finish(true));
+    titleEl.replaceWith(input); input.focus(); input.select();
+  }
+  async function cycleColor(p) {
+    const colors = (WS.data && WS.data.colors) || [];
+    const next = colors[(colors.indexOf(p.color) + 1) % colors.length];
+    try { await deps.api(`/api/projects/${p.id}`, { method: 'PATCH', body: { color: next } }); p.color = next; wsRender(); } catch (err) { deps.toast(err.message, true); }
+  }
+  async function deleteGroup(p) {
+    if (!confirm(`Delete the group "${p.name}"? Its ${p.tasks.length} ticket(s) are kept and move to "Not grouped".`)) return;
+    try { await deps.api(`/api/projects/${p.id}`, { method: 'DELETE' }); await loadWorkspace(); } catch (err) { deps.toast(err.message, true); }
+  }
+
+  function bindWorkspace() {
+    $('wsNewGroup').addEventListener('click', openNewGroup);
+    $('wsNewCancel').addEventListener('click', closeNewGroup);
+    $('wsNewForm').addEventListener('submit', createGroup);
+    $('wsNewName').addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') closeNewGroup(); });
+    let t = null;
+    $('wsSearch').addEventListener('input', (e) => { clearTimeout(t); t = setTimeout(() => { WS.q = e.target.value.trim().toLowerCase(); wsRender(); }, 120); });
+    $('wsSearch').addEventListener('keydown', (e) => e.stopPropagation());
+    $('wsHideEnded').addEventListener('change', (e) => { WS.hideEnded = e.target.checked; try { localStorage.setItem('scopedesk_ws_hide', WS.hideEnded ? '1' : '0'); } catch (_) { /* fine */ } wsRender(); });
+  }
+  function resetWorkspace() { WS.data = null; WS.loaded = false; WS.error = ''; WS.editing = 0; WS.dirty = false; WS.seq += 1; clearTimeout(WS.timer); }
+
 
   // ---------- ANALYTICS ----------
   function chartTooltip(container) {
@@ -822,13 +629,13 @@
       rule('Only approved apps and folders', 'The host agent on the client\'s PC watches the window in front. Any app or folder outside the ticket\'s scope stops input at once and ends the session.'),
       rule('Kill switch', '"Terminate Session Now" stops remote control on this PC first, then revokes the token and disconnects the vendor, even if the internet is slow.'),
       rule('Revoked tokens stay revoked', 'A terminated, expired or completed ticket can never be reopened with its token.'),
-      rule('Private board and assistant', 'Your board cards and assistant conversations are yours only. Never paste passwords, OTPs or tokens into the assistant.')));
+      rule('Private assistant', 'Your assistant conversations are yours only. Never paste passwords, OTPs or tokens into the assistant.')));
 
     // Shortcuts
     const mod = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘' : 'Ctrl';
     const sc = (keys, text) => h('li', {}, h('span', { class: 'keys' }, keys.map((k) => h('kbd', { text: k }))), h('span', { text }));
     $('setShortcuts').replaceChildren(h('ul', { class: 'shortcuts' },
-      sc([mod, 'K'], 'Search and commands'), sc(['T'], 'Switch light / dark mode'), sc(['G', 'R'], 'Go to Remote Connection'), sc(['G', 'M'], 'Go to Messages'), sc(['G', 'T'], 'Go to Tickets'), sc(['G', 'B'], 'Go to Boards'),
+      sc([mod, 'K'], 'Search and commands'), sc(['T'], 'Switch light / dark mode'), sc(['G', 'R'], 'Go to Remote Connection'), sc(['G', 'M'], 'Go to Messages'), sc(['G', 'T'], 'Go to Tickets'), sc(['G', 'W'], 'Go to Workspace'),
       sc(['G', 'A'], 'Go to Analytics'), sc(['G', 'S'], 'Go to Settings & Billing'), sc(['N'], 'New support task (clients)'), sc(['Esc'], 'Close a dialog or the assistant')));
   }
 
@@ -838,7 +645,7 @@
     const list = [
       { group: 'Go to', label: isClient() ? 'Tickets' : 'My Tasks', icon: 'ticket', run: () => deps.route('overview-panel') },
       { group: 'Go to', label: 'Messages', icon: 'ticket', run: () => deps.route('messagesPanel') },
-      { group: 'Go to', label: 'Boards', icon: 'board', run: () => deps.route('boardsPanel') },
+      { group: 'Go to', label: 'Workspace (projects & groups)', icon: 'workspace', run: () => deps.route('workspacePanel') },
       { group: 'Go to', label: 'Analytics', icon: 'chart', run: () => deps.route('analyticsPanel') },
       { group: 'Go to', label: isClient() ? 'Settings & Billing' : 'Settings', icon: 'settings', run: () => deps.route('settingsPanel') }
     ];
@@ -856,7 +663,7 @@
       list.push({ group: 'Actions', label: 'Open Remote Desktop', icon: 'monitor', run: deps.openSession });
       list.push({ group: 'Actions', label: 'Ask the AI assistant (draft a reply, summarise a task)', icon: 'spark', run: deps.openAssistant });
     }
-    list.push({ group: 'Actions', label: 'Add a card to my board', icon: 'board', run: () => { deps.route('boardsPanel'); setTimeout(() => $('boardAddTitle').focus(), 50); } });
+    if (isClient()) list.push({ group: 'Actions', label: 'New workspace group', icon: 'workspace', run: () => { deps.route('workspacePanel'); setTimeout(openNewGroup, 80); } });
     list.push({ group: 'Actions', label: 'Sign out', icon: 'logout', run: deps.logout });
     if (window.ScopeDeskMessages) tasks().filter((t) => t.status === 'pending' || t.status === 'active').slice(0, 10).forEach((t) => {
       list.push({ group: 'Messages', label: `Message ${counterparty(t)}`, sub: t.title, icon: 'ticket', search: `message chat text call ${counterparty(t)} ${t.title}`, run: () => ScopeDeskMessages.open(t.id) });
@@ -941,7 +748,7 @@
     const k = e.key.toLowerCase();
     if (gPressed && Date.now() - gPressed < 1200) {
       gPressed = 0;
-      const to = { r: isClient() ? 'remoteHubPanel' : null, m: 'messagesPanel', t: 'overview-panel', b: 'boardsPanel', a: 'analyticsPanel', s: 'settingsPanel' }[k];
+      const to = { r: isClient() ? 'remoteHubPanel' : null, m: 'messagesPanel', t: 'overview-panel', w: 'workspacePanel', a: 'analyticsPanel', s: 'settingsPanel' }[k];
       if (to) { e.preventDefault(); deps.route(to); }
       return;
     }
@@ -960,7 +767,7 @@
     renderTopbar();
     if (currentPanel === 'remoteHubPanel') renderHub();
     else if (currentPanel === 'analyticsPanel') renderAnalytics();
-    else if (currentPanel === 'boardsPanel') renderBoard();
+    else if (currentPanel === 'workspacePanel') { if (!WS.loaded) { wsRender(); loadWorkspace(); } else wsRender(); }
     else if (currentPanel === 'settingsPanel') renderSettings();
   }
 
@@ -984,7 +791,7 @@
     document.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => deps.route(b.dataset.go)));
     document.addEventListener('keydown', onKey);
 
-    bindBoard();
+    bindWorkspace();
     document.querySelectorAll('#anRange .seg-btn').forEach((b) => b.addEventListener('click', () => {
       rangeDays = Number(b.dataset.days);
       document.querySelectorAll('#anRange .seg-btn').forEach((x) => { const on = x === b; x.classList.toggle('active', on); x.setAttribute('aria-selected', String(on)); });
@@ -999,13 +806,14 @@
     init(d) { if (deps) return; deps = d; bind(); },
     async start() {
       running = true;
-      resetBoard();
+      resetWorkspace();
       renderTopbar();
       await loadAlerts();
       renderCurrent();
-      loadBoard();
     },
-    stop() { running = false; hubSig = ''; alerts = []; resetBoard(); plan = null; closeCmdk(); },
+    stop() { running = false; hubSig = ''; alerts = []; resetWorkspace(); plan = null; closeCmdk(); },
+    // a group or a ticket in it changed (this tab, another tab, or the other side): refresh
+    workspaceChanged() { if (running) wsSoon(); },
     onRoute(panelId) {
       currentPanel = panelId;
       document.body.dataset.panel = panelId;           // CSS: e.g. no floating assistant button over the Messages composer
@@ -1016,13 +824,7 @@
     },
     onTasks() {
       if (!running) return;
-      if (currentPanel === 'boardsPanel') {
-        // tickets changed: the board only needs a redraw if ticket names it shows changed (never while you type or drag)
-        const sig = tasks().map((t) => `${t.id}:${t.title}`).join('|');
-        renderTopbar();
-        if (sig !== boardTaskSig) { boardTaskSig = sig; requestRender(); }
-        return;
-      }
+      if (currentPanel === 'workspacePanel') { renderTopbar(); wsSoon(); return; }   // ticket states changed: reload the groups once
       renderCurrent();
     },
     // after the live bar has updated in the same tick (the hub reads its clock and remote-control text)

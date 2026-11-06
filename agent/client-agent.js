@@ -79,6 +79,14 @@ process.on('SIGTERM', () => shutdown(0, 'Stopped.'));
 
 // ---------- what this PC can do right now, told to the desktop app, the server and both screens ----------
 let baseInputReason = '';
+let livePolicy = null, lastHello = null;
+let lastDetail = '';
+// the facts the vendor's "Control check" needs (this OS, can input be applied and why not, what is shared, which app waits in front)
+function sendDiag() {
+  if (!socket || !started || !injector) return;
+  const share = injector.windowHandle !== null ? 'window' : injector.windowOnly ? 'window-only' : 'screen';
+  socket.emit('agent-diag', { taskId, detail: lastDetail, inputReady: canInput(), inputReason: inputReasonNow(), os: process.platform, share, apps: livePolicy ? livePolicy.appList.slice(0, 30) : [] });
+}   // the running session's policy (widened in place by 'scope-updated')
 const canInput = () => !!injector && injector.ready && !injector.windowOnly;
 const inputReasonNow = () => (canInput() ? '' : (injector && injector.ready && injector.windowOnly ? WINDOW_ONLY_REASON : baseInputReason));
 // Re-announces the current state (after a reconnect, or when the Client switches between a screen and a single window)
@@ -88,6 +96,7 @@ function announce() {
   notify({ type: 'input', ready: canInput(), reason: inputReasonNow() });
   notify({ type: 'state', state: shown, policy: policyName });
   socket.emit('agent-state', { taskId, state: shown, policy: policyName });
+  sendDiag();
 }
 
 // ---------- session ----------
@@ -114,6 +123,25 @@ function connect(token, viewOnly = false, why = '') {
     else if (d && d.reason === 'revoked') shutdown(0, 'Remote control was stopped by the Client.');
   });
   socket.on('control-resume', (d) => { if (mine(d) && monitor) monitor.rearm(); });
+  // The Client approved more apps / folders during the session ("Request Additional Access"). Only the server can send this, and
+  // only after the Client clicked Approve. The new scope replaces the old one in place: the monitor, the input gate and the file
+  // receiver all hold this same policy object, so the very next check uses it. The session keeps running.
+  socket.on('scope-updated', (d) => {
+    if (!mine(d) || !started || ending || !livePolicy) return;
+    try {
+      const next = loadPolicy({ taskType: lastHello.taskType, targetProcess: lastHello.targetProcess, taskId, extra: { allowedPaths: d.allowedPaths, allowedApps: d.allowedApps }, sessionConfigFile: cfg.SESSION_CONFIG, log });
+      if (next.allowedPaths.length && !createPathProbe(log).supported) { log('warn', 'New folders were approved, but this OS cannot report folders: keeping the old scope.'); return; }
+      cfg.ALWAYS_ALLOW.forEach((a) => { next.apps.add(cfg.normalize(a)); next.appList.push(a); });
+      Object.assign(livePolicy, next);
+      policyName = livePolicy.name;
+      log('info', `Scope widened by the Client: apps ${livePolicy.appList.join(', ')}${livePolicy.allowedPaths.length ? '; folders ' + livePolicy.allowedPaths.join(', ') : ''}`);
+      notify({ type: 'scope', apps: livePolicy.appList.slice(0, 50), paths: livePolicy.allowedPaths.slice(0, 50) });
+      if (monitor) monitor.cache.at = 0;                                             // judge the window in front again, now
+      if (monitor && monitor.state === 'waiting') monitor.poll().catch(() => {});   // the app in front may be approved now
+      socket.emit('scope-applied', { taskId, apps: livePolicy.appList.length, paths: livePolicy.allowedPaths.length });
+      sendDiag();
+    } catch (e) { log('warn', 'Could not apply the new scope: ' + e.message); }
+  });
   socket.on('session-ended', (d) => { if (mine(d)) shutdown(0, 'Session ended.'); });
   // Vendor -> Client file, relayed by the server (only into the task's approved folders, see file-receiver.js)
   socket.on('file-chunk', (c, ack) => {
@@ -141,11 +169,13 @@ async function onHello(res) {
       started = true;
       taskId = res.taskId;
 
+      lastHello = res;
       let policy;
       try { policy = loadPolicy({ taskType: res.taskType, targetProcess: res.targetProcess, taskId: res.taskId, extra: { allowedPaths: res.allowedPaths, allowedApps: res.allowedApps }, sessionConfigFile: cfg.SESSION_CONFIG, log }); }
       catch (e) { return shutdown(1, 'Could not load the security policy: ' + e.message); }
       cfg.ALWAYS_ALLOW.forEach((a) => { policy.apps.add(cfg.normalize(a)); policy.appList.push(a); });
       policyName = policy.name;
+      livePolicy = policy;
       const probe = createPathProbe(log);
       if (policy.allowedPaths.length && !probe.supported) {
         return shutdown(1, `Policy "${policy.name}" restricts folders, but this operating system cannot report which folder a window shows. Refusing to start (a weaker check would be unsafe).`);
@@ -154,7 +184,7 @@ async function onHello(res) {
         policy, probe, pollMs: cfg.POLL_MS, ownPid: hasParent ? process.ppid : null, strikes: cfg.STRIKES, attributionMs: cfg.ATTRIBUTION_MS, log,
         debug: cfg.DEBUG_FOREGROUND,
         // Why vendor input is not being applied yet (which app is in front, or why the window cannot be read). App names only.
-        onDiag: (detail) => { log('info', `Monitor: ${detail}`); notify({ type: 'diag', detail }); },
+        onDiag: (detail) => { log('info', `Monitor: ${detail}`); notify({ type: 'diag', detail }); lastDetail = detail; sendDiag(); },
         onState: (state) => {
           // The server and both screens are told the truth: when this PC cannot apply input (view-only, no nut-js, macOS refused) the
           // state is 'view-only', never 'armed'. A locked state always wins.
@@ -162,6 +192,8 @@ async function onHello(res) {
           log('info', `State: ${state}${shown !== state ? ' (reported as ' + shown + ')' : ''}`);
           notify({ type: 'state', state: shown, policy: policy.name });
           socket.emit('agent-state', { taskId, state: shown, policy: policy.name });
+          if (state === 'armed') lastDetail = '';
+          sendDiag();
           if (state === 'locked') injector.releaseAll();
         },
         onViolation: ({ processName, kind, detail }) => {

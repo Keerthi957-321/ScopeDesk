@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-11-06-v17b';
+window.SCOPEDESK_BUILD = '2026-11-06-v18';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -717,6 +717,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try { ScopeDeskPlans.stop(); } catch (_) { /* not loaded */ }
         try { ScopeDeskWorkspace.stop(); } catch (_) { /* not loaded */ }
         try { ScopeDeskMessages.stop(); } catch (_) { /* not loaded */ }
+        try { ScopeDeskAccess.stop(); } catch (_) { /* not loaded */ }
         clearLive();
         teardownRemoteConnection();
         if (STATE.socket) { STATE.socket.disconnect(); STATE.socket = null; }
@@ -750,8 +751,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('.profile-name').forEach((el) => { el.textContent = STATE.user.username; });
         $('navOverviewLink').setAttribute('data-target', isClient ? 'clientDashboardPanel' : 'vendorDashboardPanel');
         $('navOverviewText').textContent = isClient ? 'Tickets' : 'My Tasks';
-        // Land on Tickets (My Tasks for vendors); a page you were on before a reload (Remote Connection, Boards...) is reopened
-        const WORKSPACE_PAGES = ['boardsPanel', 'analyticsPanel', 'settingsPanel', 'messagesPanel'].concat(isClient ? ['remoteHubPanel'] : []);
+        // Land on Tickets (My Tasks for vendors); a page you were on before a reload (Remote Connection, Workspace...) is reopened
+        const WORKSPACE_PAGES = ['workspacePanel', 'analyticsPanel', 'settingsPanel', 'messagesPanel'].concat(isClient ? ['remoteHubPanel'] : []);
         routeToPanel(WORKSPACE_PAGES.includes(lastPanel) ? lastPanel : (isClient ? 'clientDashboardPanel' : 'vendorDashboardPanel'));
         ScopeDeskWorkspace.start();
 
@@ -760,6 +761,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (isClient) loadVendors();
         ScopeDeskPlans.start({ role: STATE.user.role });   // clients: plan card + assistant (by plan); vendors: assistant only
         ScopeDeskMessages.start();
+        try { ScopeDeskAccess.start(); } catch (_) { /* access module not loaded */ }
     }
 
     function routeToPanel(panelId) {
@@ -788,7 +790,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 routeToPanel('sessionMonitorPanel');
             } else if (target && target !== 'overview-panel' && $(target) && $(target).classList.contains('pane-view')) {
-                routeToPanel(target);     // Command Center, Boards, Analytics, Settings & Billing (and the dashboards themselves)
+                routeToPanel(target);     // Workspace, Analytics, Settings & Billing (and the dashboards themselves)
             } else {
                 routeToPanel(STATE.user.role === 'client' ? 'clientDashboardPanel' : 'vendorDashboardPanel');
             }
@@ -816,6 +818,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ScopeDeskStatus.attachSocket(socket);   // server up/down banner
         ScopeDeskRTC.bindSocket(socket);        // WebRTC signaling + control events
         try { ScopeDeskMessages.bindSocket(socket); } catch (_) { /* messages module not loaded */ }   // chat + voice calls
+        try { ScopeDeskAccess.bindSocket(socket); } catch (_) { /* access module not loaded */ }        // Request Additional Access
+        socket.on('workspace-changed', () => { try { ScopeDeskWorkspace.workspaceChanged(); } catch (_) { /* workspace module not loaded */ } });
 
         socket.on('connect_error', (err) => {
             if (err.message === 'Authentication required') {
@@ -1068,6 +1072,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try { ScopeDeskWorkspace.onTasks(); } catch (_) { /* workspace module not loaded */ }
             try { ScopeDeskMessages.tasksChanged(STATE.tasks); } catch (_) { /* messages module not loaded */ }
             try { ScopeDeskPlans.tasksChanged(); } catch (_) { /* plans module not loaded */ }
+            try { ScopeDeskAccess.tasksLoaded(); } catch (_) { /* access module not loaded */ }
         } catch (err) {
             if (err.message !== 'Session expired.') toast(err.message, true);
         }
@@ -1418,7 +1423,16 @@ document.addEventListener('DOMContentLoaded', () => {
     ScopeDeskPlans.init({ api, streamApi, toast, loadRazorpay, getTasks: () => STATE.tasks || [], getUser: () => STATE.user });
     // Client <-> vendor messages and voice calls (messages.js)
     ScopeDeskMessages.init({ api, toast, getUser: () => STATE.user, route: (panel) => routeToPanel(panel) });
-    // Command Center, Boards, Analytics, Settings & Billing and the Ctrl/Cmd+K palette (workspace.js). It reads STATE, never writes it.
+    ScopeDeskAccess.init({
+        api, toast, getUser: () => STATE.user, getTasks: () => STATE.tasks || [],
+        getSessionTaskId: () => (STATE.session && STATE.session.task ? STATE.session.task.id : (STATE.live && STATE.live.taskId) || null),
+        // the client approved more apps/folders: show the new scope (vendor sidebar) and reload the ticket list
+        onScope: (taskId, r) => {
+            if (r && r.allowedApps && STATE.session && STATE.session.task && STATE.session.task.id === taskId) $('lblScopeProcess').textContent = r.allowedApps.join(', ');
+            loadTasks().catch(() => {});
+        }
+    });
+    // Workspace, Analytics, Settings & Billing and the Ctrl/Cmd+K palette (workspace.js). It reads STATE, never writes it.
     ScopeDeskWorkspace.init({
         api, toast,
         getUser: () => STATE.user,
@@ -1867,7 +1881,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }).then((r) => { if (r && r.ok === false && r.error !== 'not-desktop') { STATE.agentStartError = r.error || 'Could not start the host agent.'; toast(STATE.agentStartError, true); renderLiveBar(); } })
           .catch((err) => { STATE.agentStartError = err.message; toast(err.message, true); renderLiveBar(); });
     }
-    ScopeDeskDesktop.onStatus((st) => { STATE.desktopAgent = st; if (['starting', 'connected', 'running'].includes(st.phase)) STATE.agentStartError = ''; remoteBusy = false; clearTimeout(busyTimer); renderLiveBar(); });
+    if ($('btnCopyCheck')) $('btnCopyCheck').addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(controlReport()); toast('Control check copied. Paste it into a message to support.'); } catch (_) { toast('Could not copy.', true); }
+    });
+        ScopeDeskDesktop.onStatus((st) => { STATE.desktopAgent = st; if (['starting', 'connected', 'running'].includes(st.phase)) STATE.agentStartError = ''; remoteBusy = false; clearTimeout(busyTimer); renderLiveBar(); });
 
     const AGENT_TEXT = { stopped: 'stopped by you (the vendor can only watch)', unknown: 'not running', offline: 'not running', starting: 'starting...', error: 'could not start', waiting: `waiting for the approved app`, armed: 'Active Secured Session', locked: 'locked after a violation', 'view-only': 'view only (this computer is not allowing control)' };
     const SHARE_TEXT = { idle: 'not shared', starting: 'choosing screen...', waiting: 'shared, waiting for vendor', connecting: 'connecting...', live: 'live', lost: 'connection lost, retrying', stopped: 'stopped', closed: 'closed', expired: 'closed (time up)', violation: 'cut after a violation' };
@@ -1911,7 +1928,68 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (sharing && currentShareKind() === 'screen') $('liveShare').textContent += ' (entire screen)';
     }
 
+    // ---------- CONTROL CHECK (vendor): every link between your mouse and the client's PC, with the fix for the broken one ----------
+    const OS_NAME = { win32: 'Windows', darwin: 'macOS', linux: 'Linux', other: 'another system' };
+    const OS_FIX = {
+        darwin: 'On the client\'s Mac: System Settings > Privacy & Security > Accessibility, switch ScopeDesk ON (also under Screen Recording), then quit and reopen ScopeDesk.',
+        linux: 'The client\'s Linux PC must use an "Ubuntu on Xorg" (X11) session: Wayland blocks remote mouse and keyboard. Log out, pick Xorg on the login screen, log in again.',
+        win32: 'If the app on the client\'s PC runs "as administrator", Windows blocks remote input into it. Ask the client to open it normally, or to run ScopeDesk as administrator too.'
+    };
+    function controlChecks(v) {
+        const d = v.hostDiag || null;
+        const rows = [];
+        const add = (state, title, text) => rows.push({ state, title, text: text || '' });
+        const pathText = { local: 'same network', direct: 'direct internet link', relay: 'through the relay server', server: 'through the ScopeDesk server (slower)' }[v.path] || '';
+        if (v.conn === 'live') add('ok', "Client's screen is live", pathText);
+        else if (v.conn === 'connecting' || v.conn === 'starting' || v.conn === 'lost') add('wait', 'Connecting to the client\'s screen...', v.connectSlow ? 'Taking long: the two networks may block a direct link. The server relay takes over by itself.' : '');
+        else { add('wait', 'Waiting for the client to share the screen', 'The client clicks "Share my screen" in the ScopeDesk app.'); return rows; }
+        if (v.stopped) { add('bad', 'The client stopped remote control', 'You can only watch until the client presses "Start remote control" again.'); return rows; }
+        if (['offline', 'unknown'].includes(v.agent) || !v.agent) {
+            add('bad', 'Remote control is not started on the client\'s PC', 'The client must use the ScopeDesk DESKTOP app (not a web browser) and press "Start remote control". A browser can show the screen but can never be controlled.');
+            return rows;
+        }
+        add('ok', `ScopeDesk is running on the client's PC${d ? ' (' + (OS_NAME[d.os] || d.os) + ')' : ''}`);
+        if (d) {
+            if (d.inputReady) add('ok', "The client's PC accepts your mouse and keyboard");
+            else add('bad', "The client's PC is refusing remote input", [d.inputReason, OS_FIX[d.os]].filter(Boolean).join(' '));
+            if (d.share === 'window-only') add('bad', 'Only one window is shared, and this PC cannot locate it', 'Ask the client to share the Entire Screen.');
+            else add('ok', d.share === 'window' ? 'One window is shared (your clicks are placed on it)' : 'The entire screen is shared');
+        } else if (v.agent === 'view-only') add('bad', "The client's PC is not allowing control", 'Ask the client to open Help > Save diagnostics report in the ScopeDesk app.');
+        if (v.agent === 'armed') add('ok', 'An approved app is in front', d && d.apps && d.apps.length ? `Allowed: ${d.apps.filter((a) => !/^scopedesk$/i.test(a)).join(', ')}` : '');
+        else if (v.agent === 'waiting') add('bad', 'No approved app is in front on the client\'s PC', (d && d.detail ? d.detail.replace(/^waiting: /, '') + ' ' : '') + 'Click the approved app in the picture, or ask the client to open it. Need another app? Use "Request additional access".');
+        else if (v.agent === 'locked') add('bad', 'Control is locked after a scope alert', 'Only the client can decide what happens next.');
+        if (v.input === 'channel') add('ok', 'Your input goes straight to the client\'s PC');
+        else if (v.input === 'relay') add('ok', 'Your input goes through the ScopeDesk server', 'Works everywhere, a little slower than a direct link.');
+        else add('bad', 'Your input has no way to the client\'s PC', 'Check your internet connection; the page reconnects by itself.');
+        return rows;
+    }
+    let ccSig = '';
+    function renderControlCheck(v) {
+        const list = $('controlCheckList'); if (!list) return;
+        const rows = controlChecks(v || {});
+        const sig = JSON.stringify(rows);
+        if (sig === ccSig) return;
+        ccSig = sig;
+        list.replaceChildren(...rows.map((r) => {
+            const li = document.createElement('li'); li.className = `cc-item cc-${r.state}`;
+            const ico = document.createElement('span'); ico.className = 'cc-ico'; ico.setAttribute('aria-hidden', 'true');
+            const body = document.createElement('div');
+            const t = document.createElement('strong'); t.textContent = r.title; body.append(t);
+            if (r.text) { const p = document.createElement('p'); p.textContent = r.text; body.append(p); }
+            li.append(ico, body); return li;
+        }));
+    }
+    function controlReport() {
+        const v = STATE.rtcView || {};
+        const d = v.hostDiag || {};
+        return ['ScopeDesk control check', `Build: ${window.SCOPEDESK_BUILD || '-'}`, `Vendor OS: ${navigator.platform || navigator.userAgent}`,
+            `Ticket: ${STATE.live ? STATE.live.taskId : '-'}`, `Screen: ${v.conn} via ${v.path || '-'}`, `Client agent: ${v.agent}`, `Input path: ${v.input}`,
+            `Client OS: ${d.os || '-'}; input ready: ${d.inputReady}; reason: ${d.inputReason || '-'}; shared: ${d.share || '-'}`, `Front app: ${d.detail || '-'}`, '',
+            ...controlChecks(v).map((r) => `[${r.state === 'ok' ? 'OK' : r.state === 'bad' ? 'PROBLEM' : '...'}] ${r.title}${r.text ? ' - ' + r.text : ''}`)].join('\n');
+    }
+
     function renderVendorState(v) {
+        renderControlCheck(v);
         const stage = $('remoteStage'), waitCard = $('remoteWaiting'), overlay = $('remoteOverlay'), badge = $('emulatorStatusBadge');
         const proc = (STATE.live && STATE.live.process) || 'the approved app';
         let msg = null, b = '', warn = false;

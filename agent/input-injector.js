@@ -89,7 +89,11 @@ class InputInjector {
       this.keyMap = buildKeyMap(nut.Key);
       this.ready = true;
     } catch (err) {
-      this.reason = `The input library could not start (${String(err && err.message || err).split('\n')[0].slice(0, 120)}).`;
+      // Most common cause on a SECOND computer: the ScopeDesk folder was copied with the first computer's installed packages, which
+      // are built for that operating system only. Say how to fix it, in the words the client (and the vendor's Control check) reads.
+      const script = process.platform === 'win32' ? 'start-desktop-windows.bat' : 'start-desktop-mac-linux.command';
+      this.reason = `The mouse/keyboard library could not start on this computer (${String(err && err.message || err).split('\n')[0].slice(0, 120)}). `
+        + `Fix: close ScopeDesk, delete the folder agent${process.platform === 'win32' ? '\\' : '/'}node_modules if this ScopeDesk folder was copied from another computer, then run desktop${process.platform === 'win32' ? '\\' : '/'}${script} once (it installs the parts for this computer).`;
       this.log('warn', `Remote control is OFF (could not load nut-js: ${err.message}). The vendor can watch but not control.`);
     }
     return this.ready;

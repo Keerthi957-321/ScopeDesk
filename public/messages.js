@@ -168,6 +168,10 @@
     $('msgSub').textContent = `${t.title} · ${STATUS[t.status] || t.status}`;
     const inCall = call && call.taskId === t.taskId;
     const lockTip = t.why || 'Locked: texting and calling are available only during an active task.';
+    const vBtn = $('msgVideoBtn');
+    vBtn.disabled = !t.canCall || !!call;
+    vBtn.classList.toggle('locked', !t.canCall);
+    vBtn.title = !t.canCall ? (t.why || 'Locked: available only during an active task.') : call ? 'You are on a call' : `Video call ${t.otherName}`;
     const callBtn = $('msgCallBtn');
     callBtn.disabled = !t.canCall || (!!call && !inCall);
     callBtn.classList.toggle('locked', !t.canCall);
@@ -348,14 +352,72 @@
     }
   }
 
+  // ----- camera (video calls) -----
+  async function openCam(c) {
+    if (c.cam) return c.cam;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('This browser cannot use a camera.');
+    try { c.cam = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24 } }, audio: false }); }
+    catch (err) {
+      if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) throw new Error('Camera access was blocked. Allow the camera for ScopeDesk, then try again. The call continues with audio.');
+      if (err && err.name === 'NotFoundError') throw new Error('No camera was found. The call continues with audio.');
+      throw new Error('Could not use the camera. The call continues with audio.');
+    }
+    $('callSelf').srcObject = c.cam;
+    c.wantCam = true;
+    setBar(); renderVideo();
+    return c.cam;
+  }
+  // send (or stop sending) the camera on the negotiated video slot
+  async function applyCam(c) {
+    if (!c.videoTx) return;
+    const track = c.cam ? c.cam.getVideoTracks()[0] : null;
+    try { await c.videoTx.sender.replaceTrack(track || null); } catch (_) { /* the call is closing */ }
+    if (socket && c.callId) socket.emit('call-signal', { callId: c.callId, type: 'cam', on: !!track });
+  }
+  async function toggleCam() {
+    const c = call; if (!c) return;
+    if (c.cam) {
+      c.cam.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* stopped */ } });   // the camera light goes off
+      c.cam = null; c.wantCam = false; $('callSelf').srcObject = null;
+      await applyCam(c);
+    } else {
+      try { await openCam(c); await applyCam(c); } catch (err) { deps.toast(err.message, true); }
+    }
+    setBar(); renderVideo();
+  }
+  function renderVideo() {
+    const c = call;
+    const remoteOn = !!(c && c.remoteVideo && c.remoteVideo.readyState === 'live' && !c.remoteVideo.muted && c.otherCam !== false);
+    const show = !!(c && (c.cam || remoteOn || c.otherCam));
+    $('callVideoWrap').classList.toggle('hidden', !show);
+    $('callSelf').classList.toggle('hidden', !(c && c.cam));
+    $('callVideoOff').classList.toggle('hidden', remoteOn);
+    $('callVideoOff').textContent = c ? `${c.otherName || 'The other person'}'s camera is off` : '';
+    if (remoteOn) $('callVideo').play().catch(() => {});
+  }
+
   async function makePeer(c) {
     let cfg = {};
     try { cfg = await deps.api(`/api/calls/config?taskId=${encodeURIComponent(c.taskId)}`); } catch (err) { throw new Error(err.message || 'Could not prepare the call.'); }
     const pc = new RTCPeerConnection({ iceServers: cfg.iceServers || [], iceTransportPolicy: cfg.iceTransportPolicy || 'all' });
     c.pc = pc; c.pending = [];
     c.local.getTracks().forEach((t) => pc.addTrack(t, c.local));
+    // Video is always negotiated (a two-way video slot), but nothing is sent until that person turns their camera on:
+    // replaceTrack() switches it on/off at once, with no new negotiation. The caller creates the slot; the callee finds it in the offer.
+    if (c.role === 'caller') c.videoTx = pc.addTransceiver('video', { direction: 'sendrecv' });
     pc.onicecandidate = (e) => { if (e.candidate && socket) socket.emit('call-signal', { callId: c.callId, type: 'candidate', candidate: e.candidate.toJSON ? e.candidate.toJSON() : e.candidate }); };
-    pc.ontrack = (e) => { const a = $('callAudio'); if (a.srcObject !== e.streams[0]) { a.srcObject = e.streams[0]; a.play().catch(() => { /* autoplay after the click is allowed */ }); } };
+    pc.ontrack = (e) => {
+      if (e.track.kind === 'video') {
+        c.remoteVideo = e.track;
+        $('callVideo').srcObject = new MediaStream([e.track]);
+        e.track.onunmute = renderVideo; e.track.onmute = renderVideo; e.track.onended = renderVideo;
+        renderVideo();
+        return;
+      }
+      const a = $('callAudio');
+      const stream = e.streams[0] || new MediaStream([e.track]);
+      if (a.srcObject !== stream) { a.srcObject = stream; a.play().catch(() => { /* autoplay after the click is allowed */ }); }
+    };
     pc.onconnectionstatechange = () => {
       if (!call || call.pc !== pc) return;
       if (pc.connectionState === 'connected') { if (!call.startedAt) { call.startedAt = Date.now(); tick(); } setBar(); }
@@ -385,19 +447,23 @@
     else if (call.startedAt) { const s = Math.floor((Date.now() - call.startedAt) / 1000); state = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}${call.muted ? ' · muted' : ''}`; }
     else state = call.role === 'caller' ? (call.accepted ? 'Connecting...' : 'Calling...') : 'Connecting...';
     $('callBarState').textContent = state;
+    const cam = $('callCam'); cam.setAttribute('aria-pressed', String(!!call.cam)); cam.classList.toggle('cam-on', !!call.cam);
+    cam.setAttribute('aria-label', call.cam ? 'Turn camera off' : 'Turn camera on'); cam.title = call.cam ? 'Camera off' : 'Camera on';
     const m = $('callMute'); m.setAttribute('aria-pressed', String(!!call.muted)); m.classList.toggle('on', !!call.muted);
     m.setAttribute('aria-label', call.muted ? 'Unmute microphone' : 'Mute microphone');
     if (thread) renderHead();
   }
 
-  async function startCall(taskId) {
+  async function startCall(taskId, { video = false } = {}) {
     if (call) return deps.toast('You are already on a call.', true);
     const t = Number(taskId);
     let local;
     try { local = await getMic(); } catch (err) { return deps.toast(err.message, true); }
-    const r = await emit('call-invite', { taskId: t });
+    const r = await emit('call-invite', { taskId: t, video });
     if (!r.ok) { local.getTracks().forEach((x) => x.stop()); return deps.toast(r.error || 'The call could not start.', true); }
-    call = { callId: r.callId, taskId: t, role: 'caller', otherName: r.otherName, local, accepted: false, muted: false };
+    call = { callId: r.callId, taskId: t, role: 'caller', otherName: r.otherName, local, accepted: false, muted: false, wantCam: video };
+    if (video) { try { await openCam(call); } catch (err) { deps.toast(err.message, true); call.wantCam = false; } }
+    if (!isClient() && thread && !thread.trusted) deps.toast(`Call request sent. It connects only when ${r.otherName} approves.`);
     ring(true, true);
     setBar();
   }
@@ -408,7 +474,8 @@
     call.accepted = true; setBar();
     try {
       const pc = await makePeer(call);
-      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      if (call.wantCam) await applyCam(call);
+      const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket.emit('call-signal', { callId: call.callId, type: 'offer', sdp: pc.localDescription.sdp });
     } catch (err) { deps.toast(err.message || 'The call could not connect.', true); hangUp(); }
@@ -419,6 +486,8 @@
     try {
       if (d.type === 'offer' && call.pc) {
         await call.pc.setRemoteDescription({ type: 'offer', sdp: d.sdp });
+        const vt = call.pc.getTransceivers().find((t) => t.receiver && t.receiver.track && t.receiver.track.kind === 'video');
+        if (vt) { vt.direction = 'sendrecv'; call.videoTx = vt; if (call.wantCam) await applyCam(call); }
         await flushCandidates(call);
         const answer = await call.pc.createAnswer();
         await call.pc.setLocalDescription(answer);
@@ -426,6 +495,8 @@
       } else if (d.type === 'answer' && call.pc) {
         await call.pc.setRemoteDescription({ type: 'answer', sdp: d.sdp });
         await flushCandidates(call);
+      } else if (d.type === 'cam') {
+        call.otherCam = d.on === true; renderVideo();
       } else if (d.type === 'candidate' && d.candidate) {
         if (call.pc && call.pc.remoteDescription) { try { await call.pc.addIceCandidate(d.candidate); } catch (_) { /* stale */ } }
         else (call.pending = call.pending || []).push(d.candidate);
@@ -437,8 +508,22 @@
     if (!running || !d) return;
     if (call) { socket.emit('call-decline', { callId: d.callId }); return; }   // already on a call in this tab
     incoming = d;
+    // Always-On vendor + "answer automatically": connect at once, audio only (the camera is never switched on for the client)
+    if (d.autoAnswer && isClient()) {
+      deps.toast(`Answered automatically: ${d.fromName} (Always-On Access). Hang up any time.`);
+      acceptIncoming(false);
+      return;
+    }
+    const kind = d.video ? 'video' : 'voice';
+    $('callInKicker').textContent = d.request ? `Call request from your vendor (${kind}). It connects only if you approve.`
+      : d.trusted ? `Incoming ${kind} call \u00B7 Always-On vendor` : `Incoming ${kind} call`;
     $('callInName').textContent = d.fromName;
     $('callInSub').textContent = `About: ${d.title}`;
+    $('callAccept').setAttribute('aria-label', d.request ? 'Approve (audio)' : 'Accept call');
+    $('callAccept').title = d.request ? 'Approve and connect (audio)' : 'Accept';
+    $('callAcceptVideo').classList.toggle('hidden', !d.video);
+    $('callInAutoRow').classList.toggle('hidden', !(d.trusted && isClient()));
+    $('callInAuto').checked = !!d.autoAnswer;
     $('callIncoming').classList.remove('hidden');
     ring(true, false);
     $('callAccept').focus();
@@ -446,13 +531,14 @@
   }
   function hideIncoming() { incoming = null; $('callIncoming').classList.add('hidden'); if (!call) ring(false); }
 
-  async function acceptIncoming() {
+  async function acceptIncoming(withVideo = false) {
     const d = incoming;
     if (!d) return;
     hideIncoming(); ring(false);
     let local;
     try { local = await getMic(); } catch (err) { socket.emit('call-decline', { callId: d.callId }); return deps.toast(err.message, true); }
-    call = { callId: d.callId, taskId: d.taskId, role: 'callee', otherName: d.fromName, local, muted: false };
+    call = { callId: d.callId, taskId: d.taskId, role: 'callee', otherName: d.fromName, local, muted: false, wantCam: !!withVideo };
+    if (withVideo) { try { await openCam(call); } catch (err) { deps.toast(err.message, true); call.wantCam = false; } }
     setBar('Connecting...');
     try {
       await makePeer(call);                       // ready BEFORE accepting, so the caller's offer always finds a connection
@@ -471,8 +557,11 @@
       clearInterval(c.timer);
       try { if (c.pc) c.pc.close(); } catch (_) { /* closed */ }
       if (c.local) c.local.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* stopped */ } });
+      if (c.cam) c.cam.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* stopped */ } });
     }
     const a = $('callAudio'); a.srcObject = null;
+    $('callVideo').srcObject = null; $('callSelf').srcObject = null;
+    renderVideo();
     setBar();
   }
 
@@ -505,11 +594,19 @@
     $('msgInput').addEventListener('input', grow);
     $('msgInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('msgCompose').requestSubmit(); } });
     $('msgCallBtn').addEventListener('click', () => { if (thread && !call) startCall(thread.taskId); else if (call && thread && call.taskId === thread.taskId) hangUp(); });
+    $('msgVideoBtn').addEventListener('click', () => { if (thread && !call) startCall(thread.taskId, { video: true }); });
+    $('callCam').addEventListener('click', () => toggleCam());
+    $('callAcceptVideo').addEventListener('click', () => acceptIncoming(true));
+    $('callInAuto').addEventListener('change', async (e) => {
+      const d = incoming; if (!d) return;
+      try { await deps.api(`/api/vendors/${d.fromId}/contact`, { method: 'PUT', body: { autoAnswer: e.target.checked } }); deps.toast(e.target.checked ? `Calls from ${d.fromName} will be answered automatically (audio only). Change it in Messages.` : 'Automatic answering is off.'); }
+      catch (err) { e.target.checked = !e.target.checked; deps.toast(err.message, true); }
+    });
     $('msgBack').addEventListener('click', () => { $('msgThread').classList.remove('has-thread'); });
     $('msgTrustBtn').addEventListener('click', () => setTrust(!(thread && thread.trusted)));
     $('msgAiDraft').addEventListener('click', draftReply);
     $('msgClosedTrust').addEventListener('click', () => setTrust(true));
-    $('callAccept').addEventListener('click', acceptIncoming);
+    $('callAccept').addEventListener('click', () => acceptIncoming(false));
     $('callDecline').addEventListener('click', declineIncoming);
     $('callEnd').addEventListener('click', hangUp);
     $('callMute').addEventListener('click', toggleMute);

@@ -199,6 +199,7 @@
       }
     });
     s.on('agent-status', (d) => { if (d.taskId === taskId) { agentEvents++; diag('host agent (server)', d.online ? 'online' : 'offline'); set({ agent: d.online ? (['offline', 'unknown'].includes(view.agent) ? 'waiting' : view.agent) : 'offline' }); refreshInput(); } });
+    s.on('agent-diag', (d) => { if (d && d.taskId === taskId) { diag('client PC', `${d.os} input=${d.inputReady ? 'yes' : 'no'}`); set({ hostDiag: d }); } });
     s.on('agent-state', (d) => { if (d.taskId === taskId) { agentEvents++; diag('agent state', d.state); set({ agent: d.state, policy: d.policy || view.policy }); refreshInput(); } });
     // The server had nobody to hand an input event to (the Client's agent is not connected): show it instead of failing silently
     s.on('input-undeliverable', (d) => { if (d.taskId === taskId && role === 'viewer') { diag('input', 'not delivered: host agent offline'); set({ agent: 'offline', input: 'none' }); } });

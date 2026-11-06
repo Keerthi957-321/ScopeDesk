@@ -190,22 +190,8 @@ function initSqliteTables() {
   if (!orderCols.includes('plan')) sqliteDb.exec("ALTER TABLE payment_orders ADD COLUMN plan TEXT NOT NULL DEFAULT ''");
   // users.membership_until: ISO time the paid membership ends ('' = never had one). The plan itself is worked out from this
   // and users.created_at (trial) every time, so there is no "plan" flag that could be stale.
-  // BOARDS: each user's own kanban cards (To do / In progress / Done). Private to the user; never shared with the other side.
-  sqliteDb.exec(`
-    CREATE TABLE IF NOT EXISTS board_items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      title TEXT NOT NULL,
-      notes TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo', 'doing', 'done')),
-      priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high')),
-      position REAL NOT NULL DEFAULT 0,
-      task_id INTEGER,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_board_user ON board_items (user_id, status, position);
-  `);
+  // BOARDS were removed in update 18 (replaced by the shared Workspace, server/workspace.js). Their private cards are dropped.
+  sqliteDb.exec('DROP INDEX IF EXISTS idx_board_user; DROP TABLE IF EXISTS board_items;');
   // MESSAGES: client <-> vendor conversation of one ticket (text, and call records such as "Missed call" / "Call 4:12")
   sqliteDb.exec(`
     CREATE TABLE IF NOT EXISTS task_messages (
@@ -227,6 +213,9 @@ function initSqliteTables() {
       UNIQUE (client_id, vendor_user_id)
     );
   `);
+  // auto_answer: the client chose to have calls from this Always-On vendor answered automatically (audio only, camera stays off)
+  const contactCols = sqliteDb.prepare('PRAGMA table_info(client_vendor_contacts)').all().map((c) => c.name);
+  if (!contactCols.includes('auto_answer')) sqliteDb.exec('ALTER TABLE client_vendor_contacts ADD COLUMN auto_answer INTEGER NOT NULL DEFAULT 0');
   const memberCols = sqliteDb.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
   if (!memberCols.includes('membership_until')) sqliteDb.exec("ALTER TABLE users ADD COLUMN membership_until TEXT NOT NULL DEFAULT ''");
   if (!memberCols.includes('membership_plan')) sqliteDb.exec("ALTER TABLE users ADD COLUMN membership_plan TEXT NOT NULL DEFAULT ''");

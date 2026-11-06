@@ -73,6 +73,13 @@ class ForegroundMonitor {
     if (!win || !win.owner) return { ok: false, kind: 'app', name: '(no foreground window)' };
     if ((this.ownPid && win.owner.processId === this.ownPid) || /^scopedesk$/i.test(String(win.owner.name || '').trim())) return { ok: false, neutral: true, kind: 'app', name: 'ScopeDesk' };
     const names = [win.owner.name, win.owner.path ? String(win.owner.path).split(/[\\/]/).pop() : ''].filter(Boolean);
+    // Windows Store apps (Calculator, Photos, Settings...) run inside "ApplicationFrameHost" on many Windows builds, so the process
+    // name never says "Calculator" and the session stayed "waiting" forever on those PCs. For that host only, the window title
+    // (which Windows sets to the app's name, e.g. "Calculator") identifies the app.
+    if (names.some((n) => /^applicationframehost(\.exe)?$/i.test(String(n).replace(/\s+/g, '')))) {
+      const t = String(win.title || '').trim();
+      if (t) names.push(t, t.split(/\s[-\u2013\u2014]\s/).pop().trim());
+    }
     const norm = names.map(normalize);
     const label = win.owner.name || names[0] || 'unknown';
 

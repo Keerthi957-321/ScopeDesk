@@ -11,6 +11,7 @@ const { checkPathScope, readList } = require('./task-scope');
 const MAX_EVENTS_PER_SEC = 400;
 const ENDED_MARK_MS = 10 * 60 * 1000;   // how long a finished task is remembered as 'ended' before its memory is released
 const AUTH_CACHE_MS = 2000;
+const scopeVersion = new Map();   // taskId -> n, bumped when the client approves more access: cached scope checks are redone at once
 const UNDELIVERED_NOTE_MS = 3000;
 
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
@@ -171,6 +172,18 @@ module.exports = function createRemoteControl({ io, db, authorizeRtc, emitToTask
       if (typeof ack === 'function') ack({ ok });
     });
 
+    // Why input is (not) applied on the client's PC, in plain words (which app is in front, a missing OS permission...), so the
+    // VENDOR's "Control check" can say exactly which link is broken. App names and reasons only: never window titles or typed text.
+    socket.on('agent-diag', (p) => {
+      if (!p || Number(p.taskId) !== taskId) return;
+      const txt = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]+/g, ' ').slice(0, n);
+      emitToTask(taskId, 'agent-diag', {
+        taskId, detail: txt(p.detail, 300), inputReady: p.inputReady === true, inputReason: txt(p.inputReason, 300),
+        os: ['win32', 'darwin', 'linux'].includes(p.os) ? p.os : 'other', share: ['screen', 'window', 'window-only', 'none'].includes(p.share) ? p.share : 'none',
+        apps: Array.isArray(p.apps) ? p.apps.slice(0, 30).map((a) => txt(a, 60)) : []
+      }).catch(() => {});
+    });
+
     // The agent reports waiting / armed / locked so both UIs can show what is going on
     socket.on('agent-state', (p) => {
       if (!p || Number(p.taskId) !== taskId || !['waiting', 'armed', 'locked', 'view-only'].includes(p.state)) return;
@@ -285,14 +298,14 @@ module.exports = function createRemoteControl({ io, db, authorizeRtc, emitToTask
         if (now - windowStart > 1000) { windowStart = now; count = 0; }
         if (++count > MAX_EVENTS_PER_SEC) return;
 
-        if (authOk.taskId !== taskId || authOk.until < now) { // hit the database at most every 2 s, not per mouse move
+        if (authOk.taskId !== taskId || authOk.until < now || authOk.ver !== (scopeVersion.get(taskId) || 0)) { // hit the database at most every 2 s, not per mouse move
           const role = await authorizeRtc(user, taskId);
           let allowedPaths = [];
           if (role === 'vendor') {
             const row = await db.get('SELECT allowed_paths, window_end FROM tasks WHERE id = ?', [taskId]);
             allowedPaths = readList(row && row.allowed_paths);
           }
-          authOk = { taskId, until: role === 'vendor' ? now + AUTH_CACHE_MS : 0, allowedPaths };
+          authOk = { taskId, until: role === 'vendor' ? now + AUTH_CACHE_MS : 0, allowedPaths, ver: scopeVersion.get(taskId) || 0 };
         }
         if (authOk.until < now || halted.has(taskId) || isStopped(taskId)) return;
 
@@ -321,5 +334,6 @@ module.exports = function createRemoteControl({ io, db, authorizeRtc, emitToTask
     });
   }
 
-  return { MIN_AGENT_PROTOCOL, registerAgent, registerBrowser, halt, resume, teardown, agentOnline, isHalted: (id) => halted.has(id), isStopped, sendToAgents };
+  const invalidateScope = (taskId) => { scopeVersion.set(Number(taskId), (scopeVersion.get(Number(taskId)) || 0) + 1); };
+  return { invalidateScope, MIN_AGENT_PROTOCOL, registerAgent, registerBrowser, halt, resume, teardown, agentOnline, isHalted: (id) => halted.has(id), isStopped, sendToAgents };
 };

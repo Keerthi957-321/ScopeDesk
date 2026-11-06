@@ -269,6 +269,23 @@
     return row;
   }
 
+  // "Copy details": what the server knows about the assistant (provider, model, last error code and cause), for support
+  function addDetails(row, err) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'chat-mini'; b.textContent = 'Copy details';
+    b.addEventListener('click', async () => {
+      let st = {};
+      try { st = await deps.api('/api/chat/status'); } catch (e) { st = { statusError: e.message }; }
+      const text = ['ScopeDesk assistant details', `Build: ${window.SCOPEDESK_BUILD || '-'}`, `Shown: ${err.message}`, `Code: ${err.code || err.status || '-'}`,
+        `Role: ${st.role || '-'}; plan: ${st.plan || '-'}; allowed: ${st.chatbot}; switched on: ${st.chatbotConfigured}`,
+        `Provider: ${(st.ai && st.ai.provider) || '-'}; model: ${(st.ai && st.ai.model) || '-'}`,
+        `Last error: ${st.ai && st.ai.lastError ? `${st.ai.lastError.code} ${st.ai.lastError.cause || ''} (${st.ai.lastError.model}, ${st.ai.lastError.at})` : 'none'}`,
+        `Last answer OK: ${(st.ai && st.ai.lastOkAt) || 'never since the server started'}`].join('\n');
+      try { await navigator.clipboard.writeText(text); b.textContent = 'Copied'; } catch (_) { b.textContent = 'Could not copy'; }
+    });
+    row.appendChild(b);
+  }
+
   function addTyping() {
     const row = document.createElement('div');
     row.className = 'chat-row chat-row-assistant';
@@ -409,7 +426,8 @@
       } else {
         if (row) row.remove();
         history.pop();                     // the question was not answered; do not send it again as context
-        addBubble('error', err.message, { retry: err.status !== 402 });
+        const row = addBubble('error', err.message, { retry: err.status !== 402 });
+        addDetails(row, err);
         if (err.status === 402) refresh();   // the trial or membership just ended
       }
     } finally {

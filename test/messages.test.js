@@ -161,3 +161,35 @@ test('messages: a ticket whose time window has run out is locked even before its
   assert.equal((await h.call('PUT', `/api/vendors/${t.vendor.id}/contact`, { user: t.client })).status, 200);
   assert.equal((await h.call('POST', `/api/tasks/${t.task.id}/messages`, { user: t.vendor, body: { body: 'still there?' } })).status, 201);
 });
+
+test('calls: a normal vendor sends a REQUEST the client must approve; an Always-On vendor rings; auto-answer only if the client chose it', async () => {
+  const t = await ticket('vid', { status: 'active' });
+  const r1 = await t.vs.call('call-invite', { taskId: t.task.id, video: true });
+  assert.equal(r1.ok, true);
+  let inc = got(t.cs, 'call-incoming').at(-1).p;
+  assert.equal(inc.request, true); assert.equal(inc.trusted, false); assert.equal(inc.autoAnswer, false); assert.equal(inc.video, true);
+  await t.cs.call('call-decline', { callId: r1.callId });
+
+  assert.equal((await h.call('PUT', `/api/vendors/${t.vendor.id}/contact`, { user: t.client })).status, 200);
+  const r2 = await t.vs.call('call-invite', { taskId: t.task.id });
+  inc = got(t.cs, 'call-incoming').at(-1).p;
+  assert.equal(inc.request, false); assert.equal(inc.trusted, true); assert.equal(inc.autoAnswer, false, 'never automatic unless the client chose it');
+  await t.cs.call('call-decline', { callId: r2.callId });
+
+  const on = await h.call('PUT', `/api/vendors/${t.vendor.id}/contact`, { user: t.client, body: { autoAnswer: true } });
+  assert.equal(on.body.autoAnswer, true);
+  assert.equal((await h.call('GET', `/api/tasks/${t.task.id}/messages`, { user: t.client })).body.autoAnswer, true);
+  const r3 = await t.vs.call('call-invite', { taskId: t.task.id });
+  assert.equal(got(t.cs, 'call-incoming').at(-1).p.autoAnswer, true);
+  await t.cs.call('call-decline', { callId: r3.callId });
+
+  // the client calling the vendor is never a "request", and a vendor cannot switch auto-answer on
+  const r4 = await t.cs.call('call-invite', { taskId: t.task.id });
+  assert.equal(got(t.vs, 'call-incoming').at(-1).p.request, false);
+  await t.vs.call('call-decline', { callId: r4.callId });
+  assert.equal((await h.call('PUT', `/api/vendors/${t.vendor.id}/contact`, { user: t.vendor, body: { autoAnswer: true } })).status, 403);
+  // removing Always-On also removes auto-answer
+  await h.call('DELETE', `/api/vendors/${t.vendor.id}/contact`, { user: t.client });
+  await h.call('PUT', `/api/vendors/${t.vendor.id}/contact`, { user: t.client });
+  assert.equal((await h.call('GET', `/api/tasks/${t.task.id}/messages`, { user: t.client })).body.autoAnswer, false);
+});
