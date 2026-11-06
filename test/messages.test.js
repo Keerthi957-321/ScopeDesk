@@ -193,3 +193,22 @@ test('calls: a normal vendor sends a REQUEST the client must approve; an Always-
   await h.call('PUT', `/api/vendors/${t.vendor.id}/contact`, { user: t.client });
   assert.equal((await h.call('GET', `/api/tasks/${t.task.id}/messages`, { user: t.client })).body.autoAnswer, false);
 });
+
+test('calls through the server: media goes only between the two sockets of an ACTIVE call, size-limited', async () => {
+  const t = await ticket('relay', { status: 'active' });
+  const r = await t.vs.call('call-invite', { taskId: t.task.id });
+  const chunk = Buffer.alloc(4096);
+  const n0 = h.io.emits.length;
+  await t.vs.fire('call-media', { callId: r.callId, k: 'a', d: chunk });
+  assert.equal(h.io.emits.slice(n0).filter((e) => e.ev === 'call-media').length, 0, 'nothing before the call is answered');
+  await t.cs.call('call-accept', { callId: r.callId });
+  await t.vs.fire('call-media', { callId: r.callId, k: 'a', d: chunk, s: 1 });
+  const sent = h.io.emits.slice(n0).filter((e) => e.ev === 'call-media');
+  assert.equal(sent.length, 1); assert.equal(sent[0].to, t.cs.id, 'only to the other party');
+  await t.vs.fire('call-media', { callId: r.callId, k: 'a', d: Buffer.alloc(20000) });
+  await t.vs.fire('call-media', { callId: r.callId, k: 'x', d: chunk });
+  const stranger = await h.connect(h.tokenFor(await h.addUser('relay_stranger', 'vendor')));
+  await stranger.fire('call-media', { callId: r.callId, k: 'a', d: chunk });
+  assert.equal(h.io.emits.slice(n0).filter((e) => e.ev === 'call-media').length, 1, 'oversized, unknown kind and outsiders are dropped');
+  await t.vs.call('call-end', { callId: r.callId });
+});

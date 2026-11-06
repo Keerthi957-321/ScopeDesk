@@ -302,6 +302,7 @@
     s.on('call-incoming', onIncoming);
     s.on('call-accepted', onAccepted);
     s.on('call-signal', onSignal);
+    s.on('call-media', onMedia);
     s.on('call-ended', onEnded);
     s.on('call-taken', (d) => { if (incoming && d && d.callId === incoming.callId && !(call && call.callId === d.callId)) hideIncoming(); });
     s.on('connect', () => { if (running) loadList(); });
@@ -369,6 +370,7 @@
   }
   // send (or stop sending) the camera on the negotiated video slot
   async function applyCam(c) {
+    if (c.relay) { relayVideoSender(c); if (socket && c.callId) socket.emit('call-signal', { callId: c.callId, type: 'cam', on: !!c.cam }); return; }
     if (!c.videoTx) return;
     const track = c.cam ? c.cam.getVideoTracks()[0] : null;
     try { await c.videoTx.sender.replaceTrack(track || null); } catch (_) { /* the call is closing */ }
@@ -387,13 +389,103 @@
   }
   function renderVideo() {
     const c = call;
-    const remoteOn = !!(c && c.remoteVideo && c.remoteVideo.readyState === 'live' && !c.remoteVideo.muted && c.otherCam !== false);
+    const remoteOn = !!(c && ((c.relay && c.otherCam && c.relayFrameAt && Date.now() - c.relayFrameAt < 3000)
+      || (!c.relay && c.remoteVideo && c.remoteVideo.readyState === 'live' && !c.remoteVideo.muted && c.otherCam !== false)));
     const show = !!(c && (c.cam || remoteOn || c.otherCam));
     $('callVideoWrap').classList.toggle('hidden', !show);
     $('callSelf').classList.toggle('hidden', !(c && c.cam));
     $('callVideoOff').classList.toggle('hidden', remoteOn);
     $('callVideoOff').textContent = c ? `${c.otherName || 'The other person'}'s camera is off` : '';
     if (remoteOn) $('callVideo').play().catch(() => {});
+  }
+
+  // ----- CALL THROUGH THE SERVER (fallback when the direct link cannot be made) -----
+  // Audio: the microphone is resampled to 16 kHz, sent as 16-bit PCM chunks (~128 ms each) and played back with a small jitter
+  // buffer. Video: 5 small JPEG frames a second while the camera is on. Latency is about a quarter of a second: fine for a call.
+  const RELAY_RATE = 16000;
+  function armRelayWatch(c) {
+    clearTimeout(c.relayWatch);
+    c.relayWatch = setTimeout(() => { if (call === c && !c.relay && (!c.pc || c.pc.connectionState !== 'connected')) startRelay(true); }, 7000);
+  }
+  function startRelay(tellOther) {
+    const c = call;
+    if (!c || c.relay) return;
+    c.relay = true;
+    clearTimeout(c.relayWatch);
+    if (tellOther && socket) socket.emit('call-signal', { callId: c.callId, type: 'relay' });
+    try { if (c.pc) c.pc.close(); } catch (_) { /* closed */ }
+    c.pc = null;
+    $('callAudio').srcObject = null;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      c.ac = new AC({ sampleRate: RELAY_RATE });
+      c.ac.resume().catch(() => {});
+      const src = c.ac.createMediaStreamSource(c.local);
+      const proc = c.ac.createScriptProcessor(2048, 1, 1);
+      let seq = 0;
+      proc.onaudioprocess = (e) => {
+        if (call !== c || c.muted) return;
+        const f = e.inputBuffer.getChannelData(0);
+        const pcm = new Int16Array(f.length);
+        for (let i = 0; i < f.length; i++) { const v = Math.max(-1, Math.min(1, f[i])); pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff; }
+        socket.emit('call-media', { callId: c.callId, k: 'a', d: pcm.buffer, s: ++seq });
+      };
+      const sink = c.ac.createGain(); sink.gain.value = 0;              // keeps the processor running without echoing the mic
+      src.connect(proc); proc.connect(sink); sink.connect(c.ac.destination);
+      c.relayNodes = { src, proc, sink };
+      c.playAt = 0;
+    } catch (err) { deps.toast('This browser cannot carry the call through the server.', true); hangUp(); return; }
+    relayVideoSender(c);
+    if (!c.startedAt) { c.startedAt = Date.now(); tick(); }
+    setBar();
+    deps.toast('Direct connection not possible on these networks: the call now goes through the ScopeDesk server.');
+  }
+  function relayVideoSender(c) {
+    clearInterval(c.relayVideoTimer); c.relayVideoTimer = null;
+    if (!c.relay || !c.cam) return;
+    const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.srcObject = c.cam; v.play().catch(() => {});
+    const cv = document.createElement('canvas'); cv.width = 320; cv.height = 180;
+    const ctx = cv.getContext('2d');
+    let busy = false;
+    c.relayVideoTimer = setInterval(() => {
+      if (busy || call !== c || !c.cam || !v.videoWidth) return;
+      busy = true;
+      ctx.drawImage(v, 0, 0, cv.width, cv.height);
+      cv.toBlob((b) => { if (!b) { busy = false; return; } b.arrayBuffer().then((buf) => { if (call === c) socket.emit('call-media', { callId: c.callId, k: 'v', d: buf }); }).finally(() => { busy = false; }); }, 'image/jpeg', 0.6);
+    }, 200);
+  }
+  function onMedia(d) {
+    const c = call;
+    if (!c || !d || d.callId !== c.callId) return;
+    if (!c.relay) startRelay(false);                                      // the other side switched first
+    if (d.k === 'a' && c.ac) {
+      const pcm = new Int16Array(d.d instanceof ArrayBuffer ? d.d : (d.d.buffer ? d.d.buffer.slice(d.d.byteOffset, d.d.byteOffset + d.d.byteLength) : d.d));
+      const buf = c.ac.createBuffer(1, pcm.length, RELAY_RATE);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 0x8000;
+      const node = c.ac.createBufferSource(); node.buffer = buf; node.connect(c.ac.destination);
+      const now = c.ac.currentTime;
+      if (c.playAt < now + 0.03 || c.playAt > now + 0.6) c.playAt = now + 0.12;   // start / catch up: keep the delay small
+      node.start(c.playAt); c.playAt += buf.duration;
+    } else if (d.k === 'v') {
+      createImageBitmap(new Blob([d.d], { type: 'image/jpeg' })).then((img) => {
+        if (call !== c) return;
+        if (!c.relayCanvas) {
+          c.relayCanvas = document.createElement('canvas'); c.relayCanvas.width = img.width; c.relayCanvas.height = img.height;
+          c.relayCtx = c.relayCanvas.getContext('2d');
+          $('callVideo').srcObject = c.relayCanvas.captureStream(10);
+        }
+        c.relayCtx.drawImage(img, 0, 0, c.relayCanvas.width, c.relayCanvas.height);
+        if (img.close) img.close();
+        c.relayFrameAt = Date.now(); c.otherCam = true;
+        renderVideo();
+      }).catch(() => { /* a damaged frame is skipped */ });
+    }
+  }
+  function stopRelay(c) {
+    clearTimeout(c.relayWatch); clearInterval(c.relayVideoTimer);
+    if (c.relayNodes) { try { c.relayNodes.proc.disconnect(); c.relayNodes.src.disconnect(); } catch (_) { /* gone */ } }
+    if (c.ac) { try { c.ac.close(); } catch (_) { /* closed */ } }
   }
 
   async function makePeer(c) {
@@ -422,7 +514,8 @@
       if (!call || call.pc !== pc) return;
       if (pc.connectionState === 'connected') { if (!call.startedAt) { call.startedAt = Date.now(); tick(); } setBar(); }
       if (pc.connectionState === 'disconnected') setBar('Reconnecting...');
-      if (pc.connectionState === 'failed') { deps.toast('The call could not connect (the two networks cannot reach each other). Try again, or keep chatting.', true); hangUp(); }
+      // the two networks cannot reach each other directly: carry on through the ScopeDesk server instead of hanging up
+      if (pc.connectionState === 'failed') startRelay(true);
     };
     return pc;
   }
@@ -441,7 +534,7 @@
     if (!call) { $('callBar').classList.add('hidden'); return; }
     $('callBar').classList.remove('hidden');
     $('callBar').classList.toggle('connected', !!call.startedAt);
-    $('callBarName').textContent = call.otherName || 'Voice call';
+    $('callBarName').textContent = (call.otherName || 'Voice call') + (call.relay ? ' \u00B7 via server' : '');
     let state;
     if (override) state = override;
     else if (call.startedAt) { const s = Math.floor((Date.now() - call.startedAt) / 1000); state = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}${call.muted ? ' · muted' : ''}`; }
@@ -475,6 +568,7 @@
     try {
       const pc = await makePeer(call);
       if (call.wantCam) await applyCam(call);
+      armRelayWatch(call);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket.emit('call-signal', { callId: call.callId, type: 'offer', sdp: pc.localDescription.sdp });
@@ -495,6 +589,8 @@
       } else if (d.type === 'answer' && call.pc) {
         await call.pc.setRemoteDescription({ type: 'answer', sdp: d.sdp });
         await flushCandidates(call);
+      } else if (d.type === 'relay') {
+        startRelay(false);
       } else if (d.type === 'cam') {
         call.otherCam = d.on === true; renderVideo();
       } else if (d.type === 'candidate' && d.candidate) {
@@ -544,6 +640,7 @@
       await makePeer(call);                       // ready BEFORE accepting, so the caller's offer always finds a connection
       const r = await emit('call-accept', { callId: d.callId });
       if (!r.ok) throw new Error(r.error || 'This call is no longer ringing.');
+      armRelayWatch(call);
     } catch (err) { deps.toast(err.message, true); cleanup(); }
   }
   function declineIncoming() { const d = incoming; hideIncoming(); if (d && socket) socket.emit('call-decline', { callId: d.callId }); }
@@ -558,6 +655,7 @@
       try { if (c.pc) c.pc.close(); } catch (_) { /* closed */ }
       if (c.local) c.local.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* stopped */ } });
       if (c.cam) c.cam.getTracks().forEach((t) => { try { t.stop(); } catch (_) { /* stopped */ } });
+      stopRelay(c);
     }
     const a = $('callAudio'); a.srcObject = null;
     $('callVideo').srcObject = null; $('callSelf').srcObject = null;

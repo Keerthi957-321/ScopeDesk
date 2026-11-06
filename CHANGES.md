@@ -1,3 +1,12 @@
+# Update 19 (build 2026-11-06-v19): calls work between any two networks; vendor sees exactly what happens to every click and key
+
+| Change | Files |
+|---|---|
+| FIX calls between two laptops: without a TURN relay, two computers often cannot connect directly (different networks, router or Wi-Fi isolation), and the call used to hang up with "could not connect". Now, if the direct link is not up within 7 s (or fails), the call automatically continues THROUGH THE SCOPEDESK SERVER: voice as 16 kHz audio chunks (~0.25 s delay), video as 5 small pictures a second, mute and camera on/off still work. The call bar shows "via server". Only between the two people of an active call, size- and rate-limited, never stored | `public/messages.js`, `server/conversations.js` |
+| Remote control feedback: the client's PC counts the vendor's clicks/keys it APPLIED and REFUSED, with the reason in plain words ("Google Chrome" is in front, not an approved app (Calculator); keys are held while ScopeDesk is in front; clicked on ScopeDesk's own window...). The vendor's Control check shows "Your actions are applied on the client's PC (n)" or "Your last action was refused: why" | `agent/input-injector.js`, `agent/monitor.js`, `agent/client-agent.js`, `server/remote-control.js`, `public/script.js` |
+| Shorter, complete "input library could not start" fix text (it was cut off) | `agent/input-injector.js`, `desktop/agent-runner.js` |
+| Tests: agent end-to-end "vendor types 12+7 into Calculator (Windows Store app)", server media relay rules | `agent/test/remote-control-e2e.test.js`, `agent/test/helpers/real-agent-harness.js`, `test/messages.test.js` |
+
 # Update 18 (build 2026-11-06-v18): cross-OS control fixes + Control check, Request Additional Access, video calls, Workspace replaces Boards
 
 | Change | Files |

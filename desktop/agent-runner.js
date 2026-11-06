@@ -82,7 +82,7 @@ function createAgentRunner({ agentDir, serverUrl, forkFn = fork, execPath = proc
       else if (m.type === 'connected') { if (inited && status.phase !== 'running') set({ phase: 'connected', uiState: 'waiting' }); }
       else if (m.type === 'diag') { if (inited) set({ detail: String(m.detail || '').slice(0, 300) }); }   // why input is not applied yet (app names only)
       else if (m.type === 'state') { if (inited) set({ phase: 'running', uiState: String(m.state), policy: String(m.policy || ''), ...(m.state === 'armed' ? { detail: '' } : {}) }); }
-      else if (m.type === 'input') { if (inited) set({ inputReady: m.ready === true, inputReason: String(m.reason || '').slice(0, 200) }); }
+      else if (m.type === 'input') { if (inited) set({ inputReady: m.ready === true, inputReason: String(m.reason || '').slice(0, 400) }); }
       else if (m.type === 'violation') {
         set({ detail: `Scope violation (${m.kind}): ${m.processName || 'unknown app'}` });
         try { onViolation({ kind: m.kind === 'path' ? 'path' : 'app', processName: String(m.processName || 'unknown'), detail: String(m.detail || '') }); } catch (_) { /* a listener must not break the runner */ }

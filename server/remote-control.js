@@ -180,7 +180,9 @@ module.exports = function createRemoteControl({ io, db, authorizeRtc, emitToTask
       emitToTask(taskId, 'agent-diag', {
         taskId, detail: txt(p.detail, 300), inputReady: p.inputReady === true, inputReason: txt(p.inputReason, 300),
         os: ['win32', 'darwin', 'linux'].includes(p.os) ? p.os : 'other', share: ['screen', 'window', 'window-only', 'none'].includes(p.share) ? p.share : 'none',
-        apps: Array.isArray(p.apps) ? p.apps.slice(0, 30).map((a) => txt(a, 60)) : []
+        apps: Array.isArray(p.apps) ? p.apps.slice(0, 30).map((a) => txt(a, 60)) : [],
+        applied: Math.max(0, Math.min(1e9, Number(p.applied) || 0)), refused: Math.max(0, Math.min(1e9, Number(p.refused) || 0)), refusal: txt(p.refusal, 240),
+        lastApplied: Number.isFinite(Number(p.lastApplied)) ? Number(p.lastApplied) : -1, lastRefused: Number.isFinite(Number(p.lastRefused)) ? Number(p.lastRefused) : -1
       }).catch(() => {});
     });
 

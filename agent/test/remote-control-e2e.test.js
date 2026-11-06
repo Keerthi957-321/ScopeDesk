@@ -340,3 +340,33 @@ test('e2e: clicks inside the ScopeDesk window are refused (the vendor cannot pre
     assert.ok(h.os().find((o) => o.op === 'press') && h.os().filter((o) => o.op === 'move').every((m) => m.x < 1000));
   } finally { h.done(); }
 });
+
+test('e2e Calculator (Windows Store app): the vendor types 12+7 and presses Enter, it reaches the OS; the vendor is told what was applied or refused', async () => {
+  const h = rig({ hello: { allowedApps: ['Calculator'], targetProcess: 'Calculator' } });
+  const diags = () => h.messages.filter((m) => m.type === 'harness-socket-emit' && m.event === 'agent-diag').map((m) => m.diag);
+  try {
+    h.runner.init({ taskId: 7, token: 'a.b.c', manual: true });
+    await h.waitFor(() => h.runner.status().phase === 'running');
+    // Chrome in front: the vendor's click is refused, and the vendor learns why
+    h.fg({ owner: { name: 'Google Chrome', path: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' }, title: 'Calculator - Google Search', id: 4 });
+    await tick(150);
+    h.server('remote-input', { t: 'down', x: 0.5, y: 0.5, b: 0 });
+    await h.waitFor(() => diags().some((d) => d.refused >= 1 && /Google Chrome" is in front/.test(d.refusal) && /Calculator/.test(d.refusal)));
+    assert.equal(h.os().filter((o) => o.op === 'press').length, 0);
+    // the client brings Calculator to the front (inside ApplicationFrameHost on Windows 10/11)
+    h.fg({ owner: { name: 'Application Frame Host', path: 'C:\\Windows\\System32\\ApplicationFrameHost.exe' }, title: 'Calculator', id: 5 });
+    await h.waitFor(() => h.runner.status().uiState === 'armed');
+    h.server('remote-input', { t: 'down', x: 0.4, y: 0.4, b: 0 });
+    h.server('remote-input', { t: 'up', x: 0.4, y: 0.4, b: 0 });
+    h.server('remote-input', { t: 'text', s: '12+7' });
+    h.server('remote-input', { t: 'key', k: 'Enter', d: true, o: 'mac' });
+    h.server('remote-input', { t: 'key', k: 'Enter', d: false, o: 'mac' });
+    await h.waitFor(() => h.os().some((o) => o.op === 'type'));
+    await h.waitFor(() => diags().some((d) => d.applied >= 4));
+    const typed = h.os().filter((o) => o.op === 'type');
+    assert.ok(typed.length >= 1, 'typed text reached the OS');
+    assert.ok(h.os().some((o) => o.op === 'press'), 'click reached the OS');
+    const last = diags().at(-1);
+    assert.equal(last.inputReady, true); assert.ok(last.lastApplied >= 0 && last.lastApplied <= last.lastRefused, 'the latest action was applied');
+  } finally { h.done(); }
+});

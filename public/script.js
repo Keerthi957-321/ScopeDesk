@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-11-06-v18';
+window.SCOPEDESK_BUILD = '2026-11-06-v19';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -1958,7 +1958,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (v.agent === 'armed') add('ok', 'An approved app is in front', d && d.apps && d.apps.length ? `Allowed: ${d.apps.filter((a) => !/^scopedesk$/i.test(a)).join(', ')}` : '');
         else if (v.agent === 'waiting') add('bad', 'No approved app is in front on the client\'s PC', (d && d.detail ? d.detail.replace(/^waiting: /, '') + ' ' : '') + 'Click the approved app in the picture, or ask the client to open it. Need another app? Use "Request additional access".');
         else if (v.agent === 'locked') add('bad', 'Control is locked after a scope alert', 'Only the client can decide what happens next.');
-        if (v.input === 'channel') add('ok', 'Your input goes straight to the client\'s PC');
+        // what the client's PC did with your last actions (clicks, keys, scrolls)
+        if (d && (d.applied || d.refused)) {
+            const refusedLast = d.refused && (d.lastApplied < 0 || (d.lastRefused >= 0 && d.lastRefused <= d.lastApplied));
+            if (refusedLast) add('bad', 'Your last action was refused on the client\'s PC', d.refusal);
+            else add('ok', `Your actions are applied on the client's PC (${d.applied})`, d.refused ? `${d.refused} refused earlier: ${d.refusal}` : '');
+        } else if (v.agent === 'armed' || v.agent === 'waiting') add('wait', 'Click inside the remote screen to take control', 'Then click the approved app and type. Your clicks and keys appear on the client\'s screen.');
+                if (v.input === 'channel') add('ok', 'Your input goes straight to the client\'s PC');
         else if (v.input === 'relay') add('ok', 'Your input goes through the ScopeDesk server', 'Works everywhere, a little slower than a direct link.');
         else add('bad', 'Your input has no way to the client\'s PC', 'Check your internet connection; the page reconnects by itself.');
         return rows;

@@ -143,9 +143,17 @@ class ForegroundMonitor {
 
   // Called by the injector before it applies an event. Returns true if the event may be applied.
   async permit(event) {
-    if (this.state === 'locked') return false;
-    const { result } = await this.read(150);
+    if (this.state === 'locked') { this.lastRefusal = 'Control is locked after a scope alert on the client\'s PC.'; return false; }
+    const { win, result } = await this.read(150);
     const mouse = ['move', 'down', 'up', 'wheel'].includes(event.t);
+    // why the action is refused, in words the vendor's Control check shows (app names only, never titles or typed text)
+    const front = String((win && win.owner && win.owner.name) || result.name || 'nothing').slice(0, 60);
+    const allowed = (this.policy.appList || []).filter((a) => !/^scopedesk$/i.test(a)).join(', ');
+    this.lastRefusal = result.neutral
+      ? 'Keys are not sent while the client\'s ScopeDesk window is in front. Click the approved app in the picture first, then type.'
+      : result.kind === 'path'
+        ? `"${front}" shows a folder that is not approved${result.detail ? ' (' + String(result.detail).slice(0, 80) + ')' : ''}.`
+        : `"${front}" is in front on the client's PC, and it is not an approved app (${allowed}). Click the approved app in the picture, or ask the client to open it.`;
     if (result.ok) {
       if (this.state === 'waiting') { this.log('info', 'An in-scope window is in front. Enforcement is ON.'); this.diag(''); this.setState('armed'); }
       if (event.t !== 'move') this.lastInputAt = Date.now();

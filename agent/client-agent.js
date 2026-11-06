@@ -85,8 +85,17 @@ let lastDetail = '';
 function sendDiag() {
   if (!socket || !started || !injector) return;
   const share = injector.windowHandle !== null ? 'window' : injector.windowOnly ? 'window-only' : 'screen';
-  socket.emit('agent-diag', { taskId, detail: lastDetail, inputReady: canInput(), inputReason: inputReasonNow(), os: process.platform, share, apps: livePolicy ? livePolicy.appList.slice(0, 30) : [] });
-}   // the running session's policy (widened in place by 'scope-updated')
+  const st = injector.stats || {};
+  const now = Date.now();
+  socket.emit('agent-diag', {
+    taskId, detail: lastDetail, inputReady: canInput(), inputReason: inputReasonNow(), os: process.platform, share, apps: livePolicy ? livePolicy.appList.slice(0, 30) : [],
+    applied: st.applied || 0, refused: st.refused || 0, refusal: st.reason || '',
+    lastApplied: st.appliedAt ? Math.round((now - st.appliedAt) / 1000) : -1, lastRefused: st.refusedAt ? Math.round((now - st.refusedAt) / 1000) : -1
+  });
+}
+// at most one report a second while the vendor is working
+let diagTimer = null;
+function diagSoon() { if (diagTimer) return; diagTimer = setTimeout(() => { diagTimer = null; sendDiag(); }, 800); }   // the running session's policy (widened in place by 'scope-updated')
 const canInput = () => !!injector && injector.ready && !injector.windowOnly;
 const inputReasonNow = () => (canInput() ? '' : (injector && injector.ready && injector.windowOnly ? WINDOW_ONLY_REASON : baseInputReason));
 // Re-announces the current state (after a reconnect, or when the Client switches between a screen and a single window)
@@ -204,7 +213,7 @@ async function onHello(res) {
           socket.emit('host-violation', { taskId, processName, kind, detail }, (ack) => { if (ack && !ack.ok) log('warn', 'Server did not accept the report: ' + ack.error); });
         }
       });
-      injector = new InputInjector({ monitor, log, viewOnly: !!(cfg.VIEW_ONLY || viewOnlyMode), policy });
+      injector = new InputInjector({ monitor, log, viewOnly: !!(cfg.VIEW_ONLY || viewOnlyMode), policy, onStats: () => diagSoon() });
       injector.init();
       if (display) injector.setDisplay(display);
       if (ownWindow) injector.setOwnWindow(ownWindow);

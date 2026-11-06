@@ -29,7 +29,7 @@ const fakeIo = () => {
   const s = {
     on: (ev, fn) => { handlers[ev] = fn; return s; },
     emit: (ev, payload, ack) => {
-      process.send({ type: 'harness-socket-emit', event: ev, state: payload && payload.state });
+      process.send({ type: 'harness-socket-emit', event: ev, state: payload && payload.state, diag: ev === 'agent-diag' ? payload : undefined });
       if (ev === 'agent-hello' && typeof ack === 'function') {
         connects += 1;
         const refuse = process.env.HARNESS_REFUSE_RECONNECT === 'yes' && connects > 1;

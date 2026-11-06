@@ -60,8 +60,11 @@ const ARROWS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
 const SHORTCUT_LETTERS = new Set(['KeyA', 'KeyC', 'KeyV', 'KeyX', 'KeyZ', 'KeyY', 'KeyF', 'KeyS', 'KeyP', 'KeyN', 'KeyO', 'KeyW', 'KeyT', 'KeyB', 'KeyI', 'KeyU']);
 
 class InputInjector {
-  constructor({ monitor, log, viewOnly, policy, launcher = launchFileManager, platform = process.platform }) {
+  constructor({ monitor, log, viewOnly, policy, launcher = launchFileManager, platform = process.platform, onStats = () => {} }) {
     this.monitor = monitor; this.log = log; this.viewOnly = viewOnly;
+    // What happened to the vendor's actions, for the vendor's "Control check" (counts and a reason only, never the content)
+    this.stats = { applied: 0, refused: 0, reason: '', appliedAt: 0, refusedAt: 0 };
+    this.onStats = onStats;
     this.policy = policy; this.launcher = launcher;
     this.hostMac = platform === 'darwin';
     this.keyMap = null;
@@ -92,8 +95,9 @@ class InputInjector {
       // Most common cause on a SECOND computer: the ScopeDesk folder was copied with the first computer's installed packages, which
       // are built for that operating system only. Say how to fix it, in the words the client (and the vendor's Control check) reads.
       const script = process.platform === 'win32' ? 'start-desktop-windows.bat' : 'start-desktop-mac-linux.command';
-      this.reason = `The mouse/keyboard library could not start on this computer (${String(err && err.message || err).split('\n')[0].slice(0, 120)}). `
-        + `Fix: close ScopeDesk, delete the folder agent${process.platform === 'win32' ? '\\' : '/'}node_modules if this ScopeDesk folder was copied from another computer, then run desktop${process.platform === 'win32' ? '\\' : '/'}${script} once (it installs the parts for this computer).`;
+      const sep = process.platform === 'win32' ? '\\' : '/';
+      this.reason = `The input library could not start on this computer (${String(err && err.message || err).split('\n')[0].slice(0, 60)}). `
+        + `Fix: run desktop${sep}${script} once on this PC (copied from another computer? delete agent${sep}node_modules first).`;
       this.log('warn', `Remote control is OFF (could not load nut-js: ${err.message}). The vendor can watch but not control.`);
     }
     return this.ready;
@@ -121,15 +125,28 @@ class InputInjector {
   }
 
   // Events are applied strictly in order; if the queue backs up, mouse moves are dropped first
+  refuse(event, reason) {
+    if (event && event.t === 'move') return false;                 // pointer moves are not "actions"
+    this.stats.refused += 1; this.stats.reason = String(reason || '').slice(0, 240); this.stats.refusedAt = Date.now();
+    this.onStats(this.stats);
+    return false;
+  }
+  done(event) {
+    if (event && event.t === 'move') return;
+    this.stats.applied += 1; this.stats.appliedAt = Date.now();
+    this.onStats(this.stats);
+  }
   handle(raw) {
     const event = parseInput(raw);
-    if (!event || this.state === 'locked' || this.windowOnly) return;
+    if (!event) return;
+    if (this.state === 'locked') return this.refuse(event, 'Control is locked after a scope alert on the client\'s PC.');
+    if (this.windowOnly) return this.refuse(event, 'Only one window is shared and this PC cannot locate it: ask the client to share the Entire Screen.');
     if (event.t === 'open') { this.openFolder(event.p).catch((e) => this.log('warn', 'Open folder error: ' + e.message)); return; }
-    if (!this.ready) return;
+    if (!this.ready) return this.refuse(event, this.reason || 'The client\'s PC cannot apply input.');
     if (this.pending > 150 && event.t === 'move') return;
     this.pending++;
     this.queue = this.queue
-      .then(() => this.apply(event))
+      .then(() => this.apply(event).then((ok) => { if (ok) this.done(event); }))
       .catch((e) => this.log('warn', `Input error (${event.t}): ` + e.message))   // the event type only, never its content
       .finally(() => { this.pending--; });
   }
@@ -171,7 +188,10 @@ class InputInjector {
   }
 
   async apply(event) {
-    if (!(await this.monitor.permit(event))) return;
+    if (!(await this.monitor.permit(event))) return this.refuse(event, this.monitor.lastRefusal || 'Not inside the approved scope.');
+    return (await this.applyNow(event)) !== false;
+  }
+  async applyNow(event) {
     const { mouse, Button } = nut;
 
     if (event.t === 'key') return this.applyKey(event);
@@ -186,10 +206,10 @@ class InputInjector {
     }
 
     const p = await this.point(event.x, event.y);
-    if (!p) return;
+    if (!p) return this.refuse(event, 'The shared window was closed or minimised on the client\'s PC.');
     // Never let the vendor click INSIDE ScopeDesk's own window (Stop / Terminate / alert switches belong to the Client)
-    if (event.t === 'down' && this.insideOwnWindow(p)) { this.droppedButtons.add(event.b); this.log('info', 'Vendor click on the ScopeDesk window ignored'); return; }
-    if (event.t === 'up' && this.droppedButtons.delete(event.b)) return;
+    if (event.t === 'down' && this.insideOwnWindow(p)) { this.droppedButtons.add(event.b); this.log('info', 'Vendor click on the ScopeDesk window ignored'); return this.refuse(event, 'That click was on the client\'s ScopeDesk window, which you may not use. Click the approved app instead.'); }
+    if (event.t === 'up' && this.droppedButtons.delete(event.b)) return false;
     await mouse.setPosition(p);
     if (event.t === 'down' && this.windowHandle !== null) {
       // Window session: bring the shared window to the front first, so the click lands on it and not on whatever covers it

@@ -269,11 +269,31 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
     socket.on('call-signal', (p) => {
       const call = findCall(p && p.callId);
       if (!call || call.state !== 'active') return;
-      if (!['offer', 'answer', 'candidate', 'cam'].includes(p.type)) return;   // 'cam' = "my camera is now on/off" (instant UI)
+      // 'cam' = "my camera is now on/off" (instant UI); 'relay' = "the direct link failed, send the call through the server"
+      if (!['offer', 'answer', 'candidate', 'cam', 'relay'].includes(p.type)) return;
       if (JSON.stringify(p).length > MAX_SIGNAL) return;
       const to = socket.id === call.callerSocket ? call.calleeSocket : socket.id === call.calleeSocket ? call.callerSocket : null;
       if (!to) return;
       toSocket(to, 'call-signal', { callId: call.id, type: p.type, sdp: p.sdp, candidate: p.candidate, on: p.type === 'cam' ? p.on === true : undefined });
+    });
+
+    // CALL MEDIA THROUGH THE SERVER: used when the two computers cannot reach each other directly (no TURN relay configured,
+    // strict NAT / firewall / Wi-Fi isolation). Audio: 16 kHz PCM chunks; video: small JPEG frames. Only between the two sockets
+    // of an ACTIVE call, size- and rate-limited, never stored, never logged. Volatile: a late chunk is dropped, not queued.
+    let mediaWindow = 0, mediaCount = 0;
+    socket.on('call-media', (p) => {
+      const call = findCall(p && p.callId);
+      if (!call || call.state !== 'active' || (p.k !== 'a' && p.k !== 'v')) return;
+      const d = p.d;
+      const len = d && (d.byteLength !== undefined ? d.byteLength : d.length);
+      if (!(len > 0) || len > (p.k === 'a' ? 16384 : 65536)) return;
+      const t = now();
+      if (t - mediaWindow > 1000) { mediaWindow = t; mediaCount = 0; }
+      if (++mediaCount > 40) return;                                 // ~8 audio + 5 video chunks per second are normal
+      const to = socket.id === call.callerSocket ? call.calleeSocket : socket.id === call.calleeSocket ? call.callerSocket : null;
+      if (!to) return;
+      const target = io.to(to);
+      (target.volatile || target).emit('call-media', { callId: call.id, k: p.k, d, s: Number(p.s) || 0 });
     });
 
     socket.on('disconnect', () => {
