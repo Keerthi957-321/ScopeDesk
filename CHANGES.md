@@ -1,3 +1,16 @@
+# Update 17 (build 2026-11-06-v17): Boards rebuilt, AI assistant for vendors (streamed, fast), locked / Always-On messaging
+
+| Change | Files |
+|---|---|
+| Boards rebuilt: one state object, saves for a card go to the server in order, a failed save reloads the board from the server. FIX: the board no longer re-draws while you type or drag (every ticket refresh used to wipe a rename, a half-typed card and a drag in progress) | `public/workspace.js` |
+| Boards: filter by text, priority and ticket, "Hide done", "Showing x of y", Undo after delete, "Clear" for Done, click the priority tag to change it, keyboard (arrows move, Alt+arrows reorder, Space ticks, Enter renames, Delete removes), view + filters remembered | `public/workspace.js`, `public/index.html`, `public/theme.css` |
+| Messages locked state: text box, Send and Call stay on screen but are disabled with a lock and the tooltip "available only during an active task". They unlock by themselves when a task becomes active and lock the moment its time window ends (also enforced on the server: a past end time locks even before the status changes) | `public/messages.js`, `server/conversations.js`, `server.js` |
+| Always-On Access (VIP): the client's switch in the conversation header bypasses the task-time lock for that vendor; badge "Always-On Access Approved" in the header and "Always-On" in the list; "Approve Always-On Access" button on a locked chat | `public/messages.js`, `public/index.html`, `server/conversations.js` |
+| AI assistant for vendors (no plan needed): "Ask AI" in the top bar, a ticket picker ("About"), and one-click actions: Draft a reply to my client, Summarise this task, Write my session summary, Plan the fix, Ask the client for details. Drafts get "Use in Messages", and Messages has a "Draft reply" button. The assistant sees the chosen ticket's title, description, apps, time left and recent chat (never the token), only for the user's own tickets | `server.js`, `server/assistant.js`, `public/membership.js`, `public/messages.js` |
+| Faster AI: answers stream word by word (`POST /api/chat/stream`, server-sent events) with a smooth typing reveal and a Stop button; Gemini Flash "thinking" switched off (most of the old wait); shorter answers; 25 s timeout; a dropped connection is retried once; the real network cause is logged (`[AI] Could not reach ...: ENOTFOUND`) | `server/assistant.js`, `server.js`, `public/script.js`, `public/membership.js` |
+| The floating assistant button is hidden on Messages (it covered Send) | `public/theme.css`, `public/workspace.js` |
+| Tests | `test/assistant-stream.test.js` (new), `test/messages.test.js`, `test/membership.test.js`, `test/helpers/server-harness.js` (streamed responses) |
+
 # Update 16 (build 2026-11-06-v16): client <-> vendor messages and voice calls
 
 | Change | Files |

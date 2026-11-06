@@ -56,7 +56,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const BUILD = '2026-11-06-v16'; // shown on the page so you can tell which version you are looking at
+const BUILD = '2026-11-06-v17'; // shown on the page so you can tell which version you are looking at
 const APP_URL = (process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`)).replace(/\/+$/, '');
 if (IS_PRODUCTION) app.set('trust proxy', 1); // behind Railway's proxy: real client IPs for rate limits
 
@@ -1363,32 +1363,107 @@ app.get('/api/billing/status', authenticateToken, requireRole('client'), async (
   });
 });
 
-// AI assistant. body: { messages: [{ role: 'user'|'assistant', content }] }. Allowed only on plans that include it (trial, member,
-// payments off): checked HERE on every message, so unlocking the chat box in the page does nothing.
-app.post('/api/chat', authenticateToken, requireRole('client'), async (req, res) => {
-  const ent = await planFor(req.user.userId);
-  if (!ent.chatbot) return res.status(402).json({ error: 'The AI assistant is included in the free trial and in Membership. Upgrade to keep using it.', code: 'MEMBERSHIP_REQUIRED' });
-  if (!assistant.configured) return res.status(503).json({ error: 'The AI assistant is not set up on this server yet (add GEMINI_API_KEY or OPENAI_API_KEY in the server settings).', code: 'AI_NOT_CONFIGURED' });
+// ================= AI ASSISTANT (clients by plan, vendors always) =================
+const AI_ERRORS = () => {
+  const keyName = assistant.provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY';
+  return {
+    AI_AUTH: `The AI service rejected the API key. The administrator should check ${keyName} in the server settings (Railway > Variables).`,
+    AI_QUOTA: 'The AI service account has run out of free usage or credit. The administrator should check the AI account.',
+    AI_BUSY: 'The AI assistant is busy right now. Please try again in a minute.',
+    AI_MODEL: `The AI model "${assistant.model}" is not available for this key. The administrator can set ${assistant.provider === 'gemini' ? 'GEMINI_MODEL' : 'OPENAI_MODEL'} to another model.`,
+    AI_UNREACHABLE: 'Could not reach the AI service. Please try again in a moment.'
+  };
+};
+const aiErrorText = (code) => AI_ERRORS()[code] || 'The AI assistant could not answer right now. Please try again.';
+
+// Facts about one ticket the user is a party of, so the assistant can draft a reply or a summary. Nothing secret (no tokens).
+async function chatContext(user, taskId) {
+  const id = Number(taskId);
+  if (!Number.isInteger(id) || id <= 0) return '';
+  const t = await db.get(`SELECT t.*, COALESCE(NULLIF(cu.organization, ''), cu.username) AS client_name, vu.username AS vendor_username
+    FROM tasks t LEFT JOIN users cu ON cu.id = t.client_id LEFT JOIN users vu ON vu.id = t.assigned_vendor_user_id WHERE t.id = ?`, [id]);
+  if (!t || !((user.role === 'client' && t.client_id === user.userId) || (user.role === 'vendor' && t.assigned_vendor_user_id === user.userId))) return '';
+  let apps = []; try { apps = JSON.parse(t.allowed_apps || '[]'); } catch (_) { /* none */ }
+  let folders = []; try { folders = JSON.parse(t.allowed_paths || '[]'); } catch (_) { /* none */ }
+  const end = t.window_end ? parseDbDate(t.window_end) : null;
+  const minsLeft = end ? Math.round((end.getTime() - Date.now()) / 60000) : null;
+  const lines = [
+    `Title: ${String(t.title || '').slice(0, 200)}`,
+    `Task description: ${String(t.description || t.task || '').slice(0, 1200)}`,
+    `Status: ${t.status}${minsLeft != null && ['pending', 'active'].includes(t.status) ? ` (${Math.max(0, minsLeft)} minutes left in the time window)` : ''}`,
+    `Duration: ${t.duration_minutes || '?'} minutes. Allowed apps: ${apps.join(', ') || 'none listed'}.${folders.length ? ` Allowed folders: ${folders.join(', ')}.` : ''}`,
+    `Client: ${t.client_name || 'client'}. Vendor: ${t.vendor_username || 'vendor'}.`
+  ];
+  const msgs = await db.all("SELECT sender_id, kind, body FROM task_messages WHERE task_id = ? ORDER BY id DESC LIMIT 12", [id]);
+  if (msgs.length) {
+    lines.push('Recent chat (oldest first):');
+    msgs.reverse().forEach((m) => lines.push(`${m.sender_id === t.client_id ? 'Client' : 'Vendor'}${m.kind === 'call' ? ' (call)' : ''}: ${String(m.body).slice(0, 300)}`));
+  }
+  return lines.join('\n');
+}
+
+// Shared checks for /api/chat and /api/chat/stream. Returns { error: [status, body] } or what the assistant needs.
+async function prepareChat(req) {
+  const role = req.user.role;
+  if (role !== 'client' && role !== 'vendor') return { error: [403, { error: 'The AI assistant is for clients and vendors.' }] };
+  if (role === 'client') {
+    const ent = await planFor(req.user.userId);
+    if (!ent.chatbot) return { error: [402, { error: 'The AI assistant is included in the free trial and in Membership. Upgrade to keep using it.', code: 'MEMBERSHIP_REQUIRED' }] };
+  }
+  if (!assistant.configured) return { error: [503, { error: 'The AI assistant is not set up on this server yet (add GEMINI_API_KEY or OPENAI_API_KEY in the server settings).', code: 'AI_NOT_CONFIGURED' }] };
   const limitKey = `chat|${req.user.userId}`;
-  if (isLimited(limitKey, 40)) return res.status(429).json({ error: 'You have sent a lot of questions. Please wait a few minutes.' });
+  if (isLimited(limitKey, 60)) return { error: [429, { error: 'You have sent a lot of questions. Please wait a few minutes.' }] };
   recordAttempt(limitKey, 60 * 60 * 1000);
   const clean = assistant.cleanMessages(req.body && req.body.messages);
-  if (clean.error) return res.status(400).json({ error: clean.error });
+  if (clean.error) return { error: [400, { error: clean.error }] };
+  const context = req.body && req.body.taskId != null ? await chatContext(req.user, req.body.taskId) : '';
+  return { messages: clean.messages, opts: { role, name: req.user.organization || req.user.username, context } };
+}
+
+// Who may chat (any signed-in client or vendor): the chat window uses this to show itself or the reason it is locked
+app.get('/api/chat/status', authenticateToken, async (req, res) => {
+  const role = req.user.role;
+  let chatbot = role === 'vendor';
+  let plan = role === 'vendor' ? 'vendor' : null;
+  if (role === 'client') { const ent = await planFor(req.user.userId); chatbot = ent.chatbot; plan = ent.plan; }
+  res.json({ role, plan, chatbot, chatbotConfigured: assistant.configured, paymentsEnabled: billing.enabled, streaming: true });
+});
+
+// One answer at once. body: { messages: [{ role: 'user'|'assistant', content }], taskId? }. Checked HERE on every message.
+app.post('/api/chat', authenticateToken, async (req, res) => {
+  const prep = await prepareChat(req);
+  if (prep.error) return res.status(prep.error[0]).json(prep.error[1]);
   try {
-    const reply = await assistant.reply(clean.messages, { clientName: req.user.organization || req.user.username });
-    res.json({ reply });
+    res.json({ reply: await assistant.reply(prep.messages, prep.opts) });
   } catch (err) {
-    console.error('[AI] chat failed:', err.code || err.message);
-    const keyName = assistant.provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY';
-    const messages = {
-      AI_AUTH: `The AI service rejected the API key. The administrator should check ${keyName} in the server settings (Railway > Variables).`,
-      AI_QUOTA: 'The AI service account has run out of free usage or credit. The administrator should check the AI account.',
-      AI_BUSY: 'The AI assistant is busy right now. Please try again in a minute.',
-      AI_MODEL: `The AI model "${assistant.model}" is not available for this key. The administrator can set ${assistant.provider === 'gemini' ? 'GEMINI_MODEL' : 'OPENAI_MODEL'} to another model.`,
-      AI_UNREACHABLE: 'Could not reach the AI service. Please try again in a moment.'
-    };
-    res.status(502).json({ error: messages[err.code] || 'The AI assistant could not answer right now. Please try again.', code: err.code || 'AI_ERROR' });
+    console.error('[AI] chat failed:', err.code || err.message, err.cause || '');
+    res.status(502).json({ error: aiErrorText(err.code), code: err.code || 'AI_ERROR' });
   }
+});
+
+// The same, streamed as Server-Sent Events so the first words show within a moment:
+//   event: delta  data: {"t":"..."}      (many)
+//   event: done   data: {"reply":"..."}  or   event: error  data: {"error":"...","code":"..."}
+app.post('/api/chat/stream', authenticateToken, async (req, res) => {
+  const prep = await prepareChat(req);
+  if (prep.error) return res.status(prep.error[0]).json(prep.error[1]);
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');                 // proxies (Railway, nginx) must not hold the stream back
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  let closed = false;
+  req.on('close', () => { closed = true; });
+  const send = (event, data) => { if (!closed) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
+  send('open', {});
+  try {
+    const reply = await assistant.stream(prep.messages, prep.opts, (t) => send('delta', { t }));
+    send('done', { reply });
+  } catch (err) {
+    console.error('[AI] chat stream failed:', err.code || err.message, err.cause || '');
+    send('error', { error: aiErrorText(err.code), code: err.code || 'AI_ERROR' });
+  }
+  res.end();
 });
 
 // Buy (or renew) a membership. body: { plan: 'monthly' | 'yearly' }. The price comes from the server, never from the browser.
@@ -1664,7 +1739,7 @@ app.get('/api/tasks/:id/messages', authenticateToken, async (req, res) => {
   const r = await conversations.messages(req.user, req.params.id);
   if (!r) return res.status(404).json({ error: 'Conversation not found.' });
   const a = r.access;
-  res.json({ messages: r.messages, me: req.user.userId, taskId: a.task.id, title: a.task.title, status: a.task.status, otherName: a.otherName, canSend: a.canSend, canCall: a.canCall, why: a.why });
+  res.json({ messages: r.messages, me: req.user.userId, taskId: a.task.id, title: a.task.title, status: a.task.status, otherName: a.otherName, canSend: a.canSend, canCall: a.canCall, why: a.why, trusted: a.trusted, open: a.open, vendorId: a.vendorId, role: a.role, windowEnd: a.task.window_end || null });
 });
 app.post('/api/tasks/:id/messages', authenticateToken, async (req, res) => {
   const limitKey = `chat-send|${req.user.userId}`;
@@ -1678,6 +1753,17 @@ app.post('/api/tasks/:id/messages/read', authenticateToken, async (req, res) => 
   const r = await conversations.markRead(req.user, req.params.id);
   if (r.error) return res.status(r.status).json({ error: r.error });
   res.json({ success: true, updated: r.updated });
+});
+// "Always-On Access" (VIP): the client approves a vendor to text / call at any time (PUT) or takes it back (DELETE). Clients only.
+app.put('/api/vendors/:id/contact', authenticateToken, requireRole('client'), async (req, res) => {
+  const r = await conversations.setTrusted(req.user, req.params.id, true);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  res.json({ success: true, trusted: true });
+});
+app.delete('/api/vendors/:id/contact', authenticateToken, requireRole('client'), async (req, res) => {
+  const r = await conversations.setTrusted(req.user, req.params.id, false);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  res.json({ success: true, trusted: false });
 });
 // ICE servers for a voice call (TURN credentials for 2 hours). Only for a party of a ticket that may call right now.
 app.get('/api/calls/config', authenticateToken, async (req, res) => {

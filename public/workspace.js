@@ -7,12 +7,10 @@
   let deps = null;
   let running = false;
   let alerts = [];                  // client only: security events (GET /api/alerts)
-  let board = [];                   // GET /api/board
-  let boardLoaded = false;
-  let boardView = 'kanban';
   let rangeDays = 30;
   let plan = null;                  // from ScopeDeskPlans
   let currentPanel = '';
+  let boardTaskSig = '';
 
   // ---------- THEME (light / dark / match the computer) ----------
   // The choice is a per-device preference, so it lives in localStorage (guarded: it can be blocked). index.html applies it before
@@ -155,7 +153,7 @@
     if (setSub) setSub.textContent = isClient() ? 'Your account, your plan, and how ScopeDesk protects your computer.' : 'Your account and the rules every session follows.';
     $('topbarTitle').textContent = TITLES[currentPanel] || 'ScopeDesk';
     $('topAvatar').textContent = u ? u.username.charAt(0).toUpperCase() : 'U';
-    $('btnTopAssistant').classList.toggle('hidden', !isClient());
+    $('btnTopAssistant').classList.remove('hidden');                     // clients (by plan) and vendors both have the assistant
     $('navRemoteLink').classList.toggle('hidden', !isClient());          // vendors use Remote Desktop instead
     const pill = $('topPlanPill');
     pill.classList.toggle('hidden', !isClient() || !plan);
@@ -243,143 +241,392 @@
   }
 
   // ---------- BOARDS ----------
-  const COLUMNS = [{ key: 'todo', label: 'To do' }, { key: 'doing', label: 'In progress' }, { key: 'done', label: 'Done' }];
+  // One state object; every change goes: update state -> render -> save to the server (in order, per card).
+  // The board never re-draws while you are typing in it or dragging a card (that used to wipe edits); it catches up right after.
+  const COLUMNS = [
+    { key: 'todo', label: 'To do', hint: 'Things to start', empty: 'Nothing waiting. Add a card with + below.' },
+    { key: 'doing', label: 'In progress', hint: 'Working on it', empty: 'Drag a card here, or press → on a card, when you start.' },
+    { key: 'done', label: 'Done', hint: 'Finished', empty: 'Tick a card and it lands here.' }
+  ];
+  const STARTERS = {
+    client: ['Check the fix works after the session', 'Send the vendor the error screenshot', 'Back up the files before the next session', 'Review what the vendor changed'],
+    vendor: ['Ask the client for the error screenshot', 'Test the fix before ending the session', 'Write a short summary of what I changed', 'Follow up with the client tomorrow']
+  };
   const PRIORITY = { high: 'High', normal: 'Normal', low: 'Low' };
-  async function loadBoard() {
-    try { board = (await deps.api('/api/board')).items || []; boardLoaded = true; } catch (err) { deps.toast(err.message, true); }
-    renderBoard();
-  }
-  const sorted = (status) => board.filter((c) => c.status === status).sort((a, b) => a.position - b.position || a.id - b.id);
+  const PRIO_RANK = { high: 0, normal: 1, low: 2 };
+  const BOARD_PREFS = 'scopedesk_board_prefs';
+  const B = {
+    items: [], loaded: false, error: '',
+    view: 'kanban',
+    filter: { q: '', priority: '', ticket: '', hideDone: false },
+    busy: 0,                 // > 0 while the user is typing in the board or dragging: renders wait
+    dirty: false,            // a render was skipped while busy
+    dragId: null,
+    queues: new Map(),       // card id -> promise chain, so saves for one card reach the server in order
+    undo: null,              // { card, timer } after a delete
+    loadSeq: 0
+  };
+  try { const p = JSON.parse(localStorage.getItem(BOARD_PREFS) || '{}'); if (p.view === 'list' || p.view === 'kanban') B.view = p.view; if (p.filter) Object.assign(B.filter, { priority: p.filter.priority || '', hideDone: !!p.filter.hideDone }); } catch (_) { /* blocked storage: defaults */ }
+  function savePrefs() { try { localStorage.setItem(BOARD_PREFS, JSON.stringify({ view: B.view, filter: { priority: B.filter.priority, hideDone: B.filter.hideDone } })); } catch (_) { /* fine */ } }
 
-  async function patchCard(card, changes) {
-    const before = { ...card };
-    Object.assign(card, changes);                      // optimistic: the board moves at once
-    renderBoard();
+  const ticketTitle = (id) => { const t = tasks().find((x) => x.id === id); return t ? t.title : null; };
+  const byPos = (a, b) => a.position - b.position || a.id - b.id;
+  const inCol = (status) => B.items.filter((c) => c.status === status).sort(byPos);
+  function matches(c) {
+    const f = B.filter;
+    if (f.hideDone && c.status === 'done') return false;
+    if (f.priority && c.priority !== f.priority) return false;
+    if (f.ticket === 'none' && c.taskId) return false;
+    if (f.ticket && f.ticket !== 'none' && String(c.taskId) !== f.ticket) return false;
+    if (f.q) { const hay = `${c.title} ${(c.taskId && ticketTitle(c.taskId)) || ''}`.toLowerCase(); if (!hay.includes(f.q)) return false; }
+    return true;
+  }
+  const filtering = () => !!(B.filter.q || B.filter.priority || B.filter.ticket || B.filter.hideDone);
+
+  // ----- busy guard: hold renders while typing / dragging -----
+  function holdRender() { B.busy += 1; }
+  function releaseRender() { B.busy = Math.max(0, B.busy - 1); if (!B.busy && B.dirty) { B.dirty = false; renderBoard(); } }
+  function requestRender() { if (B.busy) { B.dirty = true; return; } renderBoard(); }
+
+  // ----- server sync -----
+  async function loadBoard() {
+    const seq = ++B.loadSeq;
     try {
-      const res = await deps.api(`/api/board/${card.id}`, { method: 'PATCH', body: changes });
-      Object.assign(card, res.item);
+      const items = (await deps.api('/api/board')).items || [];
+      if (seq !== B.loadSeq) return;                 // a newer load already answered
+      B.items = items; B.loaded = true; B.error = '';
     } catch (err) {
-      Object.assign(card, before);
-      deps.toast(err.message, true);
+      if (seq !== B.loadSeq) return;
+      B.error = err.message; B.loaded = true;
     }
-    renderBoard();
+    requestRender();
   }
-  async function deleteCard(card) {
-    const i = board.indexOf(card);
-    board.splice(i, 1);
-    renderBoard();
-    try { await deps.api(`/api/board/${card.id}`, { method: 'DELETE' }); }
-    catch (err) { board.splice(i, 0, card); renderBoard(); deps.toast(err.message, true); }
+  // Saves for the same card run one after another; if one fails, the board reloads from the server (the source of truth)
+  function enqueue(id, job) {
+    const prev = B.queues.get(id) || Promise.resolve();
+    const next = prev.then(job, job).catch((err) => { deps.toast(err.message, true); loadBoard(); });
+    B.queues.set(id, next);
+    next.finally(() => { if (B.queues.get(id) === next) B.queues.delete(id); });
+    return next;
   }
-  // New position for a card dropped at `index` in a column (between its neighbours)
-  function positionAt(status, index, movingId) {
-    const list = sorted(status).filter((c) => c.id !== movingId);
-    const prev = list[index - 1], next = list[index];
+  function updateCard(card, changes) {
+    Object.assign(card, changes, { updatedAt: new Date().toISOString() });
+    requestRender();
+    return enqueue(card.id, async () => {
+      const res = await deps.api(`/api/board/${card.id}`, { method: 'PATCH', body: changes });
+      const live = B.items.find((c) => c.id === card.id);
+      if (live && res.item) { live.updatedAt = res.item.updatedAt; }   // keep local order/state; it is what we just sent
+    });
+  }
+  async function addCard(title, { status = 'todo', priority = 'normal', taskId = null, position } = {}) {
+    const res = await deps.api('/api/board', { method: 'POST', body: { title, status, priority, taskId } });
+    const item = res.item;
+    B.items.push(item);
+    if (position !== undefined) { item.position = position; enqueue(item.id, () => deps.api(`/api/board/${item.id}`, { method: 'PATCH', body: { position } })); }
+    requestRender();
+    return item;
+  }
+  function deleteCard(card) {
+    B.items = B.items.filter((c) => c !== card);
+    showUndo(card);
+    requestRender();
+    enqueue(card.id, () => deps.api(`/api/board/${card.id}`, { method: 'DELETE' }));
+  }
+  function showUndo(card) {
+    if (B.undo) clearTimeout(B.undo.timer);
+    const bar = $('boardUndo');
+    $('boardUndoText').textContent = `Deleted "${card.title.length > 48 ? card.title.slice(0, 48) + '...' : card.title}".`;
+    bar.classList.remove('hidden');
+    B.undo = { card, timer: setTimeout(hideUndo, 6000) };
+  }
+  function hideUndo() { if (B.undo) clearTimeout(B.undo.timer); B.undo = null; $('boardUndo').classList.add('hidden'); }
+  async function undoDelete() {
+    const u = B.undo; hideUndo();
+    if (!u) return;
+    const c = u.card;
+    try { await addCard(c.title, { status: c.status, priority: c.priority, taskId: c.taskId, position: c.position }); }
+    catch (err) { deps.toast(err.message, true); }
+  }
+
+  // ----- positions -----
+  // Position for a card placed before `beforeId` (or at the end) in a column. Uses neighbours that are on screen, so it
+  // works the same with or without filters. Re-numbers the column when the gaps get too small.
+  function positionBefore(status, beforeId, movingId) {
+    const list = inCol(status).filter((c) => c.id !== movingId);
+    const i = beforeId == null ? list.length : list.findIndex((c) => c.id === beforeId);
+    const at = i === -1 ? list.length : i;
+    const prev = list[at - 1], next = list[at];
     if (!prev && !next) return 0;
     if (!prev) return next.position - 1;
     if (!next) return prev.position + 1;
+    if (next.position - prev.position < 1e-6) { renumber(status, movingId); return positionBefore(status, beforeId, movingId); }
     return (prev.position + next.position) / 2;
   }
-  function moveBy(card, dir) {
+  function renumber(status, skipId) {
+    inCol(status).filter((c) => c.id !== skipId).forEach((c, i) => { if (c.position !== i) updateCard(c, { position: i }); });
+  }
+  function moveTo(card, status, beforeId) {
+    if (card.status === status && beforeId === card.id) return;
+    updateCard(card, { status, position: positionBefore(status, beforeId, card.id) });
+  }
+  function step(card, dir) {
     const i = COLUMNS.findIndex((c) => c.key === card.status);
     const to = COLUMNS[i + dir];
-    if (to) patchCard(card, { status: to.key, position: positionAt(to.key, 0, card.id) });
+    if (!to) return;
+    const first = inCol(to.key)[0];
+    moveTo(card, to.key, first ? first.id : null);
+    focusCardSoon(card.id);
+  }
+  function reorder(card, dir) {
+    const list = inCol(card.status).filter(matches);
+    const i = list.indexOf(card);
+    const j = i + dir;
+    if (i === -1 || j < 0 || j >= list.length) return;
+    const before = dir < 0 ? list[j].id : (list[j + 1] ? list[j + 1].id : null);
+    moveTo(card, card.status, before);
+    focusCardSoon(card.id);
+  }
+  function focusCardSoon(id) {
+    const go = () => { const el = document.querySelector(`.kcard[data-id="${id}"]`); if (el && document.activeElement !== el) el.focus({ preventScroll: false }); };
+    go(); requestAnimationFrame(go);                    // now (so fast key presses are not lost) and after any held render
+  }
+  function toggleDone(card, done) {
+    const to = done ? 'done' : 'todo';
+    const first = inCol(to)[0];
+    moveTo(card, to, first ? first.id : null);
   }
 
-  function cardTitle(card) {
-    const title = h('span', { class: 'card-title', text: card.title, tabindex: '0', title: 'Double-click (or press Enter) to rename' });
-    const edit = () => {
-      const input = h('input', { class: 'card-edit', value: card.title, maxlength: '140', 'aria-label': 'Card title' });
-      const done = (save) => {
-        const v = input.value.trim();
-        if (save && v && v !== card.title) patchCard(card, { title: v }); else renderBoard();
-      };
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
-      input.addEventListener('blur', () => done(true));
-      title.replaceWith(input);
-      input.focus(); input.select();
+  // ----- inline editors (hold renders while open) -----
+  function inlineInput({ value = '', placeholder = '', label, cls, onDone }) {
+    const input = h('input', { class: cls, value, maxlength: '140', placeholder, 'aria-label': label });
+    let closed = false;
+    holdRender();
+    const finish = (save) => {
+      if (closed) return; closed = true;
+      const v = input.value.trim();
+      Promise.resolve(onDone(save ? v : null)).finally(releaseRender);
     };
-    title.addEventListener('dblclick', edit);
-    title.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); edit(); } });
-    return title;
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();                               // board shortcuts and the app's "G x" keys stay quiet while typing
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+    return input;
+  }
+  function titleEl(card) {
+    const span = h('span', { class: 'card-title', text: card.title, title: 'Double-click to rename' });
+    span.addEventListener('dblclick', () => startRename(card, span));
+    return span;
+  }
+  function startRename(card, span) {
+    const input = inlineInput({ value: card.title, label: 'Card title', cls: 'card-edit', onDone: (v) => {
+      if (v && v !== card.title) updateCard(card, { title: v }); else B.dirty = true;
+    } });
+    span.replaceWith(input); input.focus(); input.select();
   }
 
+  // ----- drawing -----
   function cardEl(card) {
     const done = card.status === 'done';
     const colIndex = COLUMNS.findIndex((c) => c.key === card.status);
-    const el = h('article', { class: `kcard${done ? ' is-done' : ''}`, draggable: 'true', dataset: { id: String(card.id) } },
+    const tName = card.taskId ? ticketTitle(card.taskId) : null;
+    const el = h('article', { class: `kcard${done ? ' is-done' : ''} prio-edge-${card.priority}`, draggable: 'true', tabindex: '0', dataset: { id: String(card.id) },
+      'aria-label': `${card.title}. ${COLUMNS[colIndex].label}${card.priority !== 'normal' ? `, ${PRIORITY[card.priority]} priority` : ''}. Arrows move it, Enter renames, Delete removes.` },
       h('div', { class: 'kcard-top' },
         h('label', { class: 'check', title: done ? 'Mark as not done' : 'Mark as done' },
-          h('input', { type: 'checkbox', checked: done, 'aria-label': `Done: ${card.title}`, onchange: (e) => patchCard(card, { status: e.target.checked ? 'done' : 'todo', position: positionAt(e.target.checked ? 'done' : 'todo', 0, card.id) }) }),
+          h('input', { type: 'checkbox', checked: done, 'aria-label': `Done: ${card.title}`, onchange: (e) => toggleDone(card, e.target.checked) }),
           h('span', { class: 'check-box', 'aria-hidden': 'true' }, icon('check'))),
-        cardTitle(card)),
+        titleEl(card)),
+      tName ? h('button', { type: 'button', class: 'kcard-ticket', title: 'Open the ticket', onclick: () => deps.route('overview-panel') }, icon('ticket'), h('span', { text: tName })) : null,
       h('div', { class: 'kcard-foot' },
-        h('span', { class: `prio prio-${card.priority}`, text: PRIORITY[card.priority] || card.priority }),
+        h('button', { type: 'button', class: `prio prio-${card.priority} prio-btn`, title: 'Change priority', text: PRIORITY[card.priority] || card.priority,
+          onclick: () => updateCard(card, { priority: card.priority === 'normal' ? 'high' : card.priority === 'high' ? 'low' : 'normal' }) }),
         h('span', { class: 'kcard-time', text: timeAgo(toMs(card.updatedAt)) }),
         h('span', { class: 'kcard-tools' },
-          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Move left', disabled: colIndex === 0, onclick: () => moveBy(card, -1) }, icon('arrowL')),
-          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Move right', disabled: colIndex === COLUMNS.length - 1, onclick: () => moveBy(card, 1) }, icon('arrowR')),
-          h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `Delete ${card.title}`, onclick: () => deleteCard(card) }, icon('trash')))));
-    el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', String(card.id)); e.dataTransfer.effectAllowed = 'move'; requestAnimationFrame(() => el.classList.add('dragging')); });
-    el.addEventListener('dragend', () => { el.classList.remove('dragging'); document.querySelectorAll('.kcol.drop').forEach((c) => c.classList.remove('drop')); document.querySelectorAll('.drop-mark').forEach((m) => m.remove()); });
+          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Move left', title: 'Move left', disabled: colIndex === 0, onclick: () => step(card, -1) }, icon('arrowL')),
+          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Move right', title: 'Move right', disabled: colIndex === COLUMNS.length - 1, onclick: () => step(card, 1) }, icon('arrowR')),
+          h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `Delete ${card.title}`, title: 'Delete', onclick: () => deleteCard(card) }, icon('trash')))));
+    el.addEventListener('keydown', (e) => {
+      if (e.target !== el) return;
+      if (e.key === 'ArrowRight') { e.preventDefault(); step(card, 1); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); step(card, -1); }
+      else if (e.key === 'ArrowUp' && e.altKey) { e.preventDefault(); reorder(card, -1); }
+      else if (e.key === 'ArrowDown' && e.altKey) { e.preventDefault(); reorder(card, 1); }
+      else if (e.key === 'Enter') { e.preventDefault(); const t = el.querySelector('.card-title'); if (t) startRename(card, t); }
+      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteCard(card); }
+      else if (e.key === ' ') { e.preventDefault(); toggleDone(card, card.status !== 'done'); focusCardSoon(card.id); }
+    });
+    el.addEventListener('dragstart', (e) => {
+      if (e.target !== el) return;
+      B.dragId = card.id; holdRender();
+      e.dataTransfer.setData('text/plain', String(card.id)); e.dataTransfer.effectAllowed = 'move';
+      requestAnimationFrame(() => el.classList.add('dragging'));
+    });
+    el.addEventListener('dragend', endDrag);
     return el;
   }
+  function endDrag() {
+    document.querySelectorAll('.kcard.dragging').forEach((c) => c.classList.remove('dragging'));
+    document.querySelectorAll('.kcol.drop').forEach((c) => c.classList.remove('drop'));
+    document.querySelectorAll('.drop-mark').forEach((m) => m.remove());
+    if (B.dragId != null) { B.dragId = null; releaseRender(); }
+  }
+  // the card the drop lands before, from the pointer height
+  function dropBefore(body, y) {
+    const cards = [...body.querySelectorAll('.kcard:not(.dragging)')];
+    const hit = cards.find((c) => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; });
+    return hit || null;
+  }
 
-  function dropIndex(list, y) {
-    const cards = [...list.querySelectorAll('.kcard:not(.dragging)')];
-    const i = cards.findIndex((c) => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; });
-    return i === -1 ? cards.length : i;
+  function quickAdd(col) {
+    const btn = h('button', { type: 'button', class: 'kcol-add', text: '+ Add a card' });
+    btn.addEventListener('click', () => {
+      const input = inlineInput({ placeholder: 'Card title, then Enter', label: `New card in ${col.label}`, cls: 'kcol-add-input', onDone: async (v) => {
+        B.dirty = true;
+        if (v) { try { await addCard(v, { status: col.key }); } catch (err) { deps.toast(err.message, true); } }
+      } });
+      btn.replaceWith(input); input.focus();
+    });
+    return btn;
+  }
+
+  function column(col) {
+    const all = inCol(col.key);
+    const cards = all.filter(matches);
+    const emptyText = all.length && !cards.length ? 'No cards match the filter.' : col.empty;
+    const body = h('div', { class: 'kcol-body' }, cards.length ? cards.map(cardEl) : h('p', { class: 'kcol-empty', text: emptyText }));
+    const count = filtering() && cards.length !== all.length ? `${cards.length}/${all.length}` : String(all.length);
+    const clearDone = col.key === 'done' && all.length > 1
+      ? h('button', { type: 'button', class: 'kcol-clear', title: 'Delete every card in Done', text: 'Clear', onclick: () => {
+        if (!confirm(`Delete all ${all.length} finished cards?`)) return;
+        all.forEach((c) => { B.items = B.items.filter((x) => x !== c); enqueue(c.id, () => deps.api(`/api/board/${c.id}`, { method: 'DELETE' })); });
+        requestRender();
+      } }) : null;
+    const sec = h('section', { class: `kcol kcol-${col.key}`, 'aria-label': col.label, dataset: { col: col.key } },
+      h('header', { class: 'kcol-head' }, h('span', { class: 'kcol-dot', 'aria-hidden': 'true' }),
+        h('div', { class: 'kcol-title' }, h('h3', { text: col.label }), h('small', { text: col.hint })),
+        clearDone, h('span', { class: 'kcol-count', text: count })),
+      body, quickAdd(col));
+    sec.addEventListener('dragover', (e) => {
+      if (B.dragId == null) return;
+      e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+      sec.classList.add('drop');
+      let mark = body.querySelector('.drop-mark') || h('div', { class: 'drop-mark', 'aria-hidden': 'true' });
+      const before = dropBefore(body, e.clientY);
+      if (before) { if (mark.nextSibling !== before) body.insertBefore(mark, before); } else if (body.lastChild !== mark) body.appendChild(mark);
+    });
+    sec.addEventListener('dragleave', (e) => { if (!sec.contains(e.relatedTarget)) { sec.classList.remove('drop'); const m = body.querySelector('.drop-mark'); if (m) m.remove(); } });
+    sec.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const id = B.dragId != null ? B.dragId : Number(e.dataTransfer.getData('text/plain'));
+      const card = B.items.find((c) => c.id === id);
+      const before = dropBefore(body, e.clientY);
+      endDrag();                                          // releases the render hold
+      if (card) moveTo(card, col.key, before ? Number(before.dataset.id) : null);
+    });
+    return sec;
+  }
+
+  function listView() {
+    const rows = COLUMNS.flatMap((c) => inCol(c.key)).filter(matches)
+      .sort((a, b) => (a.status === 'done') - (b.status === 'done') || PRIO_RANK[a.priority] - PRIO_RANK[b.priority] || byPos(a, b));
+    if (!rows.length) return h('p', { class: 'muted pad', text: B.items.length ? 'No cards match the filter.' : 'No cards yet. Add one above, or pick a starter card.' });
+    return h('table', { class: 'dtable' },
+      h('thead', {}, h('tr', {}, h('th', { text: '' }), h('th', { text: 'Card' }), h('th', { text: 'Ticket' }), h('th', { text: 'Status' }), h('th', { text: 'Priority' }), h('th', { text: 'Updated' }), h('th', { text: '' }))),
+      h('tbody', {}, rows.map((card) => h('tr', { class: card.status === 'done' ? 'is-done' : '', dataset: { id: String(card.id) } },
+        h('td', {}, h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: card.status === 'done', 'aria-label': `Done: ${card.title}`, onchange: (e) => toggleDone(card, e.target.checked) }), h('span', { class: 'check-box', 'aria-hidden': 'true' }, icon('check')))),
+        h('td', { class: 'td-title' }, titleEl(card)),
+        h('td', { class: 'muted', text: (card.taskId && ticketTitle(card.taskId)) || '-' }),
+        h('td', {}, h('select', { class: 'mini-select', 'aria-label': 'Status', onchange: (e) => moveTo(card, e.target.value, (inCol(e.target.value)[0] || {}).id ?? null) },
+          COLUMNS.map((c) => h('option', { value: c.key, selected: c.key === card.status, text: c.label })))),
+        h('td', {}, h('select', { class: 'mini-select', 'aria-label': 'Priority', onchange: (e) => updateCard(card, { priority: e.target.value }) },
+          Object.entries(PRIORITY).map(([k, v]) => h('option', { value: k, selected: k === card.priority, text: v })))),
+        h('td', { class: 'muted', text: timeAgo(toMs(card.updatedAt)) }),
+        h('td', {}, h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `Delete ${card.title}`, onclick: () => deleteCard(card) }, icon('trash')))))));
+  }
+
+  // ticket pickers (add form + filter): open tickets first
+  let pickerSig = '';
+  function fillTicketPickers() {
+    const open = (t) => (['active', 'pending'].includes(t.status) ? 1 : 0);
+    const list = tasks().slice().sort((a, b) => open(b) - open(a)).slice(0, 30);
+    const sig = list.map((t) => `${t.id}:${t.title}`).join('|');
+    if (sig === pickerSig) return;
+    pickerSig = sig;
+    const opt = (t) => h('option', { value: String(t.id), text: `${t.title.slice(0, 40)}${t.title.length > 40 ? '...' : ''}` });
+    const add = $('boardAddTicket'), flt = $('boardFilterTicket');
+    const keepA = add.value, keepF = flt.value;
+    add.replaceChildren(h('option', { value: '', text: 'No ticket' }), ...list.map(opt));
+    flt.replaceChildren(h('option', { value: '', text: 'All tickets' }), h('option', { value: 'none', text: 'Not linked' }), ...list.map(opt));
+    if ([...add.options].some((o) => o.value === keepA)) add.value = keepA;
+    if ([...flt.options].some((o) => o.value === keepF)) flt.value = keepF; else B.filter.ticket = '';
+    add.classList.toggle('hidden', list.length === 0);
+    flt.classList.toggle('hidden', list.length === 0);
   }
 
   function renderBoard() {
-    if (!deps) return;
+    if (!deps || !running) return;
+    if (B.busy) { B.dirty = true; return; }
     const kan = $('boardKanban'), list = $('boardList');
-    kan.classList.toggle('hidden', boardView !== 'kanban');
-    list.classList.toggle('hidden', boardView !== 'list');
-    if (!boardLoaded) { kan.replaceChildren(h('p', { class: 'muted', text: 'Loading your board...' })); return; }
-
-    kan.replaceChildren(...COLUMNS.map((col) => {
-      const cards = sorted(col.key);
-      const body = h('div', { class: 'kcol-body' }, cards.length ? cards.map(cardEl) : h('p', { class: 'kcol-empty', text: col.key === 'done' ? 'Finished cards land here.' : 'Drop cards here.' }));
-      const column = h('section', { class: `kcol kcol-${col.key}`, 'aria-label': col.label },
-        h('header', { class: 'kcol-head' }, h('span', { class: 'kcol-dot', 'aria-hidden': 'true' }), h('h3', { text: col.label }), h('span', { class: 'kcol-count', text: String(cards.length) })),
-        body);
-      column.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        column.classList.add('drop');
-        const idx = dropIndex(body, e.clientY);
-        let mark = body.querySelector('.drop-mark');
-        if (!mark) mark = h('div', { class: 'drop-mark', 'aria-hidden': 'true' });
-        const cardsNow = [...body.querySelectorAll('.kcard:not(.dragging)')];
-        if (cardsNow[idx]) body.insertBefore(mark, cardsNow[idx]); else body.appendChild(mark);
-      });
-      column.addEventListener('dragleave', (e) => { if (!column.contains(e.relatedTarget)) { column.classList.remove('drop'); const m = body.querySelector('.drop-mark'); if (m) m.remove(); } });
-      column.addEventListener('drop', (e) => {
-        e.preventDefault();
-        column.classList.remove('drop');
-        const m = body.querySelector('.drop-mark'); if (m) m.remove();
-        const card = board.find((c) => String(c.id) === e.dataTransfer.getData('text/plain'));
-        if (!card) return;
-        const idx = dropIndex(body, e.clientY);
-        patchCard(card, { status: col.key, position: positionAt(col.key, idx, card.id) });
-      });
-      return column;
-    }));
-
-    const all = COLUMNS.flatMap((c) => sorted(c.key));
-    list.replaceChildren(all.length ? h('table', { class: 'dtable' },
-      h('thead', {}, h('tr', {}, h('th', { text: '' }), h('th', { text: 'Card' }), h('th', { text: 'Status' }), h('th', { text: 'Priority' }), h('th', { text: 'Updated' }), h('th', { text: '' }))),
-      h('tbody', {}, all.map((card) => h('tr', { class: card.status === 'done' ? 'is-done' : '' },
-        h('td', {}, h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: card.status === 'done', 'aria-label': `Done: ${card.title}`, onchange: (e) => patchCard(card, { status: e.target.checked ? 'done' : 'todo' }) }), h('span', { class: 'check-box', 'aria-hidden': 'true' }, icon('check')))),
-        h('td', { class: 'td-title' }, cardTitle(card)),
-        h('td', {}, h('select', { class: 'mini-select', 'aria-label': 'Status', onchange: (e) => patchCard(card, { status: e.target.value, position: positionAt(e.target.value, 0, card.id) }) },
-          COLUMNS.map((c) => h('option', { value: c.key, selected: c.key === card.status, text: c.label })))),
-        h('td', {}, h('select', { class: 'mini-select', 'aria-label': 'Priority', onchange: (e) => patchCard(card, { priority: e.target.value }) },
-          Object.entries(PRIORITY).map(([k, v]) => h('option', { value: k, selected: k === card.priority, text: v })))),
-        h('td', { class: 'muted', text: timeAgo(toMs(card.updatedAt)) }),
-        h('td', {}, h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `Delete ${card.title}`, onclick: () => deleteCard(card) }, icon('trash'))))))
-    ) : h('p', { class: 'muted pad', text: 'No cards yet. Add one above.' }));
+    kan.classList.toggle('hidden', B.view !== 'kanban');
+    list.classList.toggle('hidden', B.view !== 'list');
+    document.querySelectorAll('#boardsPanel .seg-btn').forEach((x) => { const on = x.dataset.view === B.view; x.classList.toggle('active', on); x.setAttribute('aria-selected', String(on)); });
+    $('boardFilterPrio').value = B.filter.priority;
+    $('boardHideDone').checked = B.filter.hideDone;
+    fillTicketPickers();
+    if (!B.loaded) { kan.replaceChildren(h('p', { class: 'muted', text: 'Loading your board...' })); $('boardTools').classList.add('hidden'); return; }
+    if (B.error && !B.items.length) {
+      kan.replaceChildren(h('div', { class: 'board-error' }, h('p', { text: `The board could not be loaded: ${B.error}` }), h('button', { type: 'button', class: 'btn-accent small', text: 'Try again', onclick: () => { B.loaded = false; renderBoard(); loadBoard(); } })));
+      return;
+    }
+    const empty = B.items.length === 0;
+    $('boardWelcome').classList.toggle('hidden', !empty);
+    $('boardTools').classList.toggle('hidden', empty);
+    if (empty) {
+      const role = isClient() ? 'client' : 'vendor';
+      $('boardStarters').replaceChildren(...STARTERS[role].map((t) => h('button', { type: 'button', class: 'board-starter', onclick: async (e) => {
+        e.currentTarget.disabled = true;
+        try { await addCard(t); } catch (err) { deps.toast(err.message, true); e.currentTarget.disabled = false; }
+      } }, h('span', { class: 'board-starter-plus', 'aria-hidden': 'true', text: '+' }), h('span', { text: t }))));
+    }
+    const shown = B.items.filter(matches).length;
+    $('boardCount').textContent = filtering() ? `Showing ${shown} of ${B.items.length}` : `${B.items.length} card${B.items.length === 1 ? '' : 's'}`;
+    $('boardClearFilters').classList.toggle('hidden', !filtering());
+    // keep focus on the card that had it
+    const focusedId = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('kcard') ? document.activeElement.dataset.id : null;
+    if (B.view === 'kanban') kan.replaceChildren(...COLUMNS.map(column)); else list.replaceChildren(listView());
+    if (focusedId) focusCardSoon(focusedId);
   }
+
+  function bindBoard() {
+    $('boardAddForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = $('boardAddTitle');
+      const title = input.value.trim();
+      if (!title) { input.focus(); return; }
+      input.value = '';
+      const ticket = $('boardAddTicket').value;
+      try {
+        await addCard(title, { priority: $('boardAddPriority').value, taskId: ticket ? Number(ticket) : null });
+        $('boardAddPriority').value = 'normal';
+      } catch (err) { input.value = title; deps.toast(err.message, true); }
+      input.focus();
+    });
+    document.querySelectorAll('#boardsPanel .seg-btn').forEach((b) => b.addEventListener('click', () => { B.view = b.dataset.view; savePrefs(); renderBoard(); }));
+    let qTimer = null;
+    $('boardSearch').addEventListener('input', (e) => { clearTimeout(qTimer); qTimer = setTimeout(() => { B.filter.q = e.target.value.trim().toLowerCase(); renderBoard(); }, 120); });
+    $('boardSearch').addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') { e.target.value = ''; B.filter.q = ''; renderBoard(); } });
+    $('boardFilterPrio').addEventListener('change', (e) => { B.filter.priority = e.target.value; savePrefs(); renderBoard(); });
+    $('boardFilterTicket').addEventListener('change', (e) => { B.filter.ticket = e.target.value; renderBoard(); });
+    $('boardHideDone').addEventListener('change', (e) => { B.filter.hideDone = e.target.checked; savePrefs(); renderBoard(); });
+    $('boardClearFilters').addEventListener('click', () => { B.filter = { q: '', priority: '', ticket: '', hideDone: false }; $('boardSearch').value = ''; $('boardFilterTicket').value = ''; savePrefs(); renderBoard(); });
+    $('boardUndoBtn').addEventListener('click', undoDelete);
+    // a drag cancelled outside the window (Esc, dropped on nothing) never leaves the board frozen
+    document.addEventListener('drop', () => { if (B.dragId != null) setTimeout(endDrag, 0); });
+    window.addEventListener('blur', () => { if (B.dragId != null) endDrag(); });
+  }
+  function resetBoard() { B.items = []; B.loaded = false; B.error = ''; B.busy = 0; B.dirty = false; B.dragId = null; B.queues.clear(); B.loadSeq += 1; pickerSig = ''; hideUndo(); }
 
   // ---------- ANALYTICS ----------
   function chartTooltip(container) {
@@ -607,6 +854,7 @@
       list.push({ group: 'Actions', label: 'View plans & upgrade', icon: 'card', run: () => { settingsTab = 'billing'; deps.route('settingsPanel'); } });
     } else {
       list.push({ group: 'Actions', label: 'Open Remote Desktop', icon: 'monitor', run: deps.openSession });
+      list.push({ group: 'Actions', label: 'Ask the AI assistant (draft a reply, summarise a task)', icon: 'spark', run: deps.openAssistant });
     }
     list.push({ group: 'Actions', label: 'Add a card to my board', icon: 'board', run: () => { deps.route('boardsPanel'); setTimeout(() => $('boardAddTitle').focus(), 50); } });
     list.push({ group: 'Actions', label: 'Sign out', icon: 'logout', run: deps.logout });
@@ -736,24 +984,7 @@
     document.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => deps.route(b.dataset.go)));
     document.addEventListener('keydown', onKey);
 
-    $('boardAddForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const input = $('boardAddTitle');
-      const title = input.value.trim();
-      if (!title) { input.focus(); return; }
-      input.value = '';
-      try {
-        const res = await deps.api('/api/board', { method: 'POST', body: { title, priority: $('boardAddPriority').value } });
-        board.push(res.item);
-        renderBoard();
-      } catch (err) { input.value = title; deps.toast(err.message, true); }
-      input.focus();
-    });
-    document.querySelectorAll('#boardsPanel .seg-btn').forEach((b) => b.addEventListener('click', () => {
-      boardView = b.dataset.view;
-      document.querySelectorAll('#boardsPanel .seg-btn').forEach((x) => { const on = x === b; x.classList.toggle('active', on); x.setAttribute('aria-selected', String(on)); });
-      renderBoard();
-    }));
+    bindBoard();
     document.querySelectorAll('#anRange .seg-btn').forEach((b) => b.addEventListener('click', () => {
       rangeDays = Number(b.dataset.days);
       document.querySelectorAll('#anRange .seg-btn').forEach((x) => { const on = x === b; x.classList.toggle('active', on); x.setAttribute('aria-selected', String(on)); });
@@ -768,21 +999,32 @@
     init(d) { if (deps) return; deps = d; bind(); },
     async start() {
       running = true;
-      boardLoaded = false; board = [];
+      resetBoard();
       renderTopbar();
       await loadAlerts();
       renderCurrent();
       loadBoard();
     },
-    stop() { running = false; hubSig = ''; alerts = []; board = []; boardLoaded = false; plan = null; closeCmdk(); },
+    stop() { running = false; hubSig = ''; alerts = []; resetBoard(); plan = null; closeCmdk(); },
     onRoute(panelId) {
       currentPanel = panelId;
+      document.body.dataset.panel = panelId;           // CSS: e.g. no floating assistant button over the Messages composer
       if (!running) return;
       if (panelId === 'analyticsPanel') loadAlerts().then(renderCurrent);
       renderCurrent();
       const main = document.querySelector('.main-content'); if (main) main.scrollTop = 0;
     },
-    onTasks() { renderCurrent(); },
+    onTasks() {
+      if (!running) return;
+      if (currentPanel === 'boardsPanel') {
+        // tickets changed: the board only needs a redraw if ticket names it shows changed (never while you type or drag)
+        const sig = tasks().map((t) => `${t.id}:${t.title}`).join('|');
+        renderTopbar();
+        if (sig !== boardTaskSig) { boardTaskSig = sig; requestRender(); }
+        return;
+      }
+      renderCurrent();
+    },
     // after the live bar has updated in the same tick (the hub reads its clock and remote-control text)
     onRtc() { if (running && currentPanel === 'remoteHubPanel') setTimeout(renderHub, 0); },
     openPalette: openCmdk

@@ -71,7 +71,10 @@
       const av = el('span', 'msg-avatar small', initial(c.otherName));
       const body = el('span', 'msg-conv-body');
       const top = el('span', 'msg-conv-top');
-      top.append(el('strong', 'msg-conv-name', c.otherName), el('time', 'msg-conv-time', c.lastAt ? shortAgo(toMs(c.lastAt)) : ''));
+      top.append(el('strong', 'msg-conv-name', c.otherName));
+      if (c.trusted) { const star = el('span', 'msg-conv-vip', '\u2605 Always-On'); star.title = 'Always-On Access Approved: can text and call any time'; top.append(star); }
+      else if (!c.canSend) { const lock = el('span', 'msg-conv-lock', '\uD83D\uDD12'); lock.title = 'Locked: texting and calling are available only during an active task'; top.append(lock); }
+      top.append(el('time', 'msg-conv-time', c.lastAt ? shortAgo(toMs(c.lastAt)) : ''));
       const preview = c.lastBody ? `${c.lastMine && c.lastKind === 'text' ? 'You: ' : ''}${c.lastBody}` : 'No messages yet';
       const bottom = el('span', 'msg-conv-bottom');
       bottom.append(el('span', 'msg-conv-preview', preview));
@@ -89,6 +92,7 @@
 
   // ---------- thread ----------
   async function openThread(taskId) {
+    if (activeTask !== Number(taskId)) { $('msgInput').value = ''; grow(); }   // a half-written message never jumps to another conversation
     activeTask = Number(taskId);
     $('msgThread').classList.add('has-thread');
     renderList();
@@ -103,6 +107,57 @@
     }
   }
 
+  // Lock the open conversation by itself the moment the task's time window ends (no reload needed)
+  let lockTimer = null;
+  function scheduleLock() {
+    clearTimeout(lockTimer); lockTimer = null;
+    if (!thread || !thread.canSend || thread.trusted || !thread.windowEnd) return;
+    const ms = toMs(thread.windowEnd) - Date.now();
+    if (Number.isFinite(ms) && ms > 0 && ms < 2 ** 31 - 1) lockTimer = setTimeout(() => { reloadThread(); loadList(); }, ms + 1500);
+  }
+  // Called by script.js whenever the task list changes: a task that became active unlocks its chat, one that ended locks it
+  let taskSig = '';
+  function tasksChanged(tasks) {
+    if (!running) return;
+    const sig = (tasks || []).map((t) => `${t.id}:${t.status}`).join(',');
+    if (sig === taskSig) return;
+    const first = !taskSig; taskSig = sig;
+    if (first) return;
+    loadList();
+    if (thread) reloadThread();
+  }
+  async function draftReply() {
+    if (!thread || !window.ScopeDeskPlans || !ScopeDeskPlans.draft) return;
+    const btn = $('msgAiDraft'); btn.disabled = true; const label = btn.textContent; btn.textContent = 'Drafting...';
+    const input = $('msgInput');
+    try {
+      const recent = thread.messages.filter((m) => m.kind === 'text').slice(-10)
+        .map((m) => `${m.senderId === thread.me ? 'Me' : thread.otherName}: ${m.body}`).join('\n');
+      input.value = '';
+      await ScopeDeskPlans.draft({
+        taskId: thread.taskId,
+        prompt: `Draft my next chat message to ${thread.otherName} about the ticket "${thread.title}". Reply with ONLY the message text, friendly and short (1-3 sentences), no quotes.\n\nConversation so far:\n${recent || '(no messages yet)'}`
+      }, (text) => { input.value = text; grow(); });
+      input.focus();
+    } catch (err) { deps.toast(err.message, true); }
+    finally { btn.disabled = false; btn.textContent = label; }
+  }
+
+  async function reloadThread() {
+    if (!thread) return;
+    try { const r = await deps.api(`/api/tasks/${thread.taskId}/messages`); if (thread && r.taskId === thread.taskId) { thread = { ...r }; renderThread(false); } } catch (_) { /* keep the last state */ }
+  }
+  async function setTrust(on) {
+    if (!thread || thread.role !== 'client') return;
+    const btn = $('msgTrustBtn'); btn.disabled = true;
+    try {
+      await deps.api(`/api/vendors/${thread.vendorId}/contact`, { method: on ? 'PUT' : 'DELETE' });
+      deps.toast(on ? `Always-On Access approved: ${thread.otherName} can text and call you any time. Turn it off whenever you like.` : `${thread.otherName} can reach you only during an active task again.`);
+      await reloadThread(); loadList();
+    } catch (err) { deps.toast(err.message, true); }
+    finally { btn.disabled = false; }
+  }
+
   function renderHead() {
     const t = thread;
     $('msgEmpty').classList.toggle('hidden', !!t);
@@ -112,13 +167,33 @@
     $('msgName').textContent = t.otherName;
     $('msgSub').textContent = `${t.title} · ${STATUS[t.status] || t.status}`;
     const inCall = call && call.taskId === t.taskId;
-    $('msgCallBtn').disabled = !t.canCall || (!!call && !inCall);
-    $('msgCallBtn').title = !t.canCall ? (t.why || 'Calls are not possible on this ticket') : call ? (inCall ? 'On a call' : 'You are on another call') : `Call ${t.otherName}`;
-    $('msgCallBtn').classList.toggle('in-call', !!inCall);
-    $('msgCallBtn').querySelector('span').textContent = inCall ? 'On call' : 'Call';
-    $('msgCompose').classList.toggle('hidden', !t.canSend);
+    const lockTip = t.why || 'Locked: texting and calling are available only during an active task.';
+    const callBtn = $('msgCallBtn');
+    callBtn.disabled = !t.canCall || (!!call && !inCall);
+    callBtn.classList.toggle('locked', !t.canCall);
+    callBtn.title = !t.canCall ? lockTip : call ? (inCall ? 'On a call' : 'You are on another call') : `Call ${t.otherName}`;
+    callBtn.classList.toggle('in-call', !!inCall);
+    callBtn.querySelector('span').textContent = inCall ? 'On call' : !t.canCall ? 'Locked' : 'Call';
+    // Locked state: the composer stays on screen, greyed out, with the reason as its tooltip
+    const compose = $('msgCompose'), input = $('msgInput');
+    compose.classList.remove('hidden');
+    compose.classList.toggle('locked', !t.canSend);
+    compose.title = t.canSend ? '' : lockTip;
+    input.disabled = !t.canSend;
+    input.placeholder = t.canSend ? (t.trusted && !t.open ? 'Always-On Access: write any time...' : 'Write a message...') : 'Locked: available only during an active task';
+    $('msgSend').disabled = !t.canSend;
+    $('msgSend').title = t.canSend ? 'Send' : lockTip;
+    $('msgAiDraft').classList.toggle('hidden', !(t.canSend && window.ScopeDeskPlans && ScopeDeskPlans.canChat && ScopeDeskPlans.canChat()));
     $('msgClosed').classList.toggle('hidden', t.canSend);
-    $('msgClosed').textContent = t.canSend ? '' : (t.why || 'This conversation is closed.');
+    $('msgClosedText').textContent = t.canSend ? '' : lockTip;
+    // Always-On Access (VIP): the client's switch; both sides see the badge
+    const client = t.role === 'client';
+    $('msgTrustChip').classList.toggle('hidden', !t.trusted);
+    $('msgTrustBtn').classList.toggle('hidden', !client);
+    $('msgTrustBtn').setAttribute('aria-checked', String(!!t.trusted));
+    $('msgTrustBtn').classList.toggle('on', !!t.trusted);
+    $('msgClosedTrust').classList.toggle('hidden', !(client && !t.canSend && !t.trusted && /Always-On Access/.test(t.why || '')));
+    scheduleLock();
   }
 
   function renderThread(scrollToEnd) {
@@ -226,6 +301,8 @@
     s.on('call-ended', onEnded);
     s.on('call-taken', (d) => { if (incoming && d && d.callId === incoming.callId && !(call && call.callId === d.callId)) hideIncoming(); });
     s.on('connect', () => { if (running) loadList(); });
+    // the client turned "Anytime contact" on or off: refresh what is allowed
+    s.on('contact-changed', () => { if (!running) return; loadList(); if (thread) reloadThread(); });
   }
 
   // ---------- VOICE CALLS ----------
@@ -402,6 +479,7 @@
   const ENDED = {
     declined: (n) => `${n} declined the call.`, missed: (n) => `${n} did not answer.`, cancelled: () => 'The call was cancelled.',
     hangup: () => 'Call ended.', disconnected: (n) => `${n} lost the connection. The call ended.`, offline: (n) => `${n} is not online.`,
+    'contact-removed': () => 'The call ended: Always-On Access was turned off and this task has ended.',
     'session-ended': () => 'The call ended because the ticket was closed.'
   };
   function onEnded(d) {
@@ -428,6 +506,9 @@
     $('msgInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('msgCompose').requestSubmit(); } });
     $('msgCallBtn').addEventListener('click', () => { if (thread && !call) startCall(thread.taskId); else if (call && thread && call.taskId === thread.taskId) hangUp(); });
     $('msgBack').addEventListener('click', () => { $('msgThread').classList.remove('has-thread'); });
+    $('msgTrustBtn').addEventListener('click', () => setTrust(!(thread && thread.trusted)));
+    $('msgAiDraft').addEventListener('click', draftReply);
+    $('msgClosedTrust').addEventListener('click', () => setTrust(true));
     $('callAccept').addEventListener('click', acceptIncoming);
     $('callDecline').addEventListener('click', declineIncoming);
     $('callEnd').addEventListener('click', hangUp);
@@ -443,12 +524,15 @@
       running = true;
       $('msgOtherRole').textContent = isClient() ? 'vendor' : 'client';
       $('msgEmptyOther').textContent = isClient() ? 'vendor' : 'client';
+      $('msgPageSub').textContent = isClient()
+        ? 'One conversation per ticket. Texting and calling unlock during an active task. Vendors you approve for Always-On Access can reach you any time.'
+        : 'One conversation per ticket. Texting and calling unlock during an active task, or any time with clients who approved you for Always-On Access.';
       loadList();
     },
     stop() {
       if (call) hangUp();
       hideIncoming();
-      running = false; convs = []; thread = null; activeTask = null; setUnread(0);
+      running = false; convs = []; thread = null; activeTask = null; taskSig = ''; clearTimeout(lockTimer); setUnread(0);
       $('msgList').replaceChildren(); renderHead();
     },
     onRoute(panelId) {
@@ -462,6 +546,16 @@
       openThread(taskId);
     },
     call(taskId) { return startCall(taskId); },
+    tasksChanged,
+    // "Use in Messages" from the assistant: open that ticket's chat with the draft in the box (never sent automatically)
+    async prefill(taskId, text) {
+      deps.route('messagesPanel');
+      await loadList();
+      await openThread(taskId);
+      if (thread && thread.taskId === Number(taskId) && thread.canSend) { $('msgInput').value = text; grow(); $('msgInput').focus(); }
+      else if (thread) deps.toast(thread.why || 'This conversation is locked.', true);
+    },
+    refresh() { if (running) { loadList(); if (thread) renderHead(); } },
     inCall: () => !!call,
     unread: () => unread
   };

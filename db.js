@@ -218,6 +218,14 @@ function initSqliteTables() {
       read_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages (task_id, id);
+    -- "Anytime contact": a vendor the CLIENT approved may text / call that client at any time, not only during a ticket's window
+    CREATE TABLE IF NOT EXISTS client_vendor_contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_id INTEGER NOT NULL,
+      vendor_user_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (client_id, vendor_user_id)
+    );
   `);
   const memberCols = sqliteDb.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
   if (!memberCols.includes('membership_until')) sqliteDb.exec("ALTER TABLE users ADD COLUMN membership_until TEXT NOT NULL DEFAULT ''");

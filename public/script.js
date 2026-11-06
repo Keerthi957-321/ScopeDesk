@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-11-06-v16';
+window.SCOPEDESK_BUILD = '2026-11-06-v17';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -149,6 +149,44 @@ document.addEventListener('DOMContentLoaded', () => {
             throw failure;
         }
         return data;
+    }
+
+    // Streamed request (Server-Sent Events over fetch): calls onEvent(name, data) for each event as it arrives.
+    // Throws like api() when the server refuses before the stream starts (plan, rate limit, bad input).
+    async function streamApi(path, body, onEvent, signal) {
+        await resolveApiBase();
+        if (!apiResolved) throw new Error('Cannot reach the ScopeDesk server.');
+        let response;
+        try {
+            response = await fetch(API_BASE + path, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Authorization: `Bearer ${STATE.authToken}` }, body: JSON.stringify(body) });
+        } catch (err) {
+            if (err && err.name === 'AbortError') throw err;
+            throw Object.assign(new Error('Cannot reach the ScopeDesk server.'), { network: true });
+        }
+        const renewed = response.headers.get('X-New-Token');
+        if (renewed && STATE.authToken) { STATE.authToken = renewed; sessionStorage.setItem(TOKEN_KEY, renewed); if (STATE.socket) STATE.socket.auth = { token: renewed }; }
+        const type = response.headers.get('Content-Type') || '';
+        if (!response.ok || !/event-stream/.test(type) || !response.body) {
+            const data = await response.json().catch(() => ({}));
+            if (response.status === 401) { logout(data.error || 'Please sign in again.'); throw new Error('Session expired.'); }
+            throw Object.assign(new Error(data.error || `The server answered with status ${response.status}.`), { status: response.status, data, notStreaming: response.ok || response.status === 404 });
+        }
+        const reader = response.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let cut;
+            while ((cut = buf.indexOf('\n\n')) !== -1) {
+                const block = buf.slice(0, cut); buf = buf.slice(cut + 2);
+                const ev = (/^event: (.*)$/m.exec(block) || [])[1] || 'message';
+                const raw = (/^data: (.*)$/m.exec(block) || [])[1];
+                let data = {}; try { data = raw ? JSON.parse(raw) : {}; } catch (_) { /* skip a broken event */ }
+                onEvent(ev.trim(), data);
+            }
+        }
     }
 
     let toastTimer;
@@ -720,7 +758,7 @@ document.addEventListener('DOMContentLoaded', () => {
         connectSocket();
         loadTasks().then(() => restoreVendorSession(lastPanel));
         if (isClient) loadVendors();
-        if (isClient) ScopeDeskPlans.start(); else ScopeDeskPlans.stop();   // plan card + AI assistant are for clients only
+        ScopeDeskPlans.start({ role: STATE.user.role });   // clients: plan card + assistant (by plan); vendors: assistant only
         ScopeDeskMessages.start();
     }
 
@@ -1028,6 +1066,8 @@ document.addEventListener('DOMContentLoaded', () => {
             renderTasks();
             if (STATE.user.role === 'client') syncClientLive();
             try { ScopeDeskWorkspace.onTasks(); } catch (_) { /* workspace module not loaded */ }
+            try { ScopeDeskMessages.tasksChanged(STATE.tasks); } catch (_) { /* messages module not loaded */ }
+            try { ScopeDeskPlans.tasksChanged(); } catch (_) { /* plans module not loaded */ }
         } catch (err) {
             if (err.message !== 'Session expired.') toast(err.message, true);
         }
@@ -1375,7 +1415,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    ScopeDeskPlans.init({ api, toast, loadRazorpay });
+    ScopeDeskPlans.init({ api, streamApi, toast, loadRazorpay, getTasks: () => STATE.tasks || [], getUser: () => STATE.user });
     // Client <-> vendor messages and voice calls (messages.js)
     ScopeDeskMessages.init({ api, toast, getUser: () => STATE.user, route: (panel) => routeToPanel(panel) });
     // Command Center, Boards, Analytics, Settings & Billing and the Ctrl/Cmd+K palette (workspace.js). It reads STATE, never writes it.

@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap">
     <link rel="stylesheet" href="style.css?v=9">
-    <link rel="stylesheet" href="theme.css?v=20261106a">
+    <link rel="stylesheet" href="theme.css?v=20261106v17">
     <meta name="color-scheme" content="dark light">
     <script>
         // Theme before first paint (no flash): saved choice "light" | "dark" | "system" (default), system = follow the computer.
@@ -528,7 +528,7 @@
                     <div>
                         <p class="eyebrow">Talk to your <span id="msgOtherRole">vendor</span></p>
                         <h1 class="page-title">Messages</h1>
-                        <p class="page-sub">One conversation per ticket. Text any time while the ticket is open (and for 7 days after), or call while it is waiting or live.</p>
+                        <p class="page-sub" id="msgPageSub">One conversation per ticket. Texting and calling unlock during an active task. Vendors you approve for Always-On Access can reach you any time.</p>
                     </div>
                 </header>
                 <div class="msg-layout">
@@ -545,15 +545,17 @@
                         <header class="msg-head hidden" id="msgHead">
                             <button type="button" class="icon-btn msg-back" id="msgBack" aria-label="Back to conversations"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
                             <div class="msg-avatar" id="msgAvatar" aria-hidden="true">V</div>
-                            <div class="msg-head-text"><h2 id="msgName">-</h2><p id="msgSub" class="muted">-</p></div>
+                            <div class="msg-head-text"><h2><span id="msgName">-</span><span class="msg-trust-chip hidden" id="msgTrustChip" title="This pair can text and call any time, even with no active task">&#9733; Always-On Access Approved</span></h2><p id="msgSub" class="muted">-</p></div>
+                            <button type="button" class="msg-trust-toggle hidden" id="msgTrustBtn" role="switch" aria-checked="false" title="VIP: let this vendor text and call you any time, not only during an active task"><span class="msg-trust-track" aria-hidden="true"></span><span>Always-On Access</span></button>
                             <button type="button" class="btn-call" id="msgCallBtn" aria-label="Voice call"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg><span>Call</span></button>
                         </header>
                         <ol class="msg-items hidden" id="msgItems" aria-live="polite"></ol>
+                        <div class="msg-closed hidden" id="msgClosed" role="note"><span class="msg-lock-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><span id="msgClosedText"></span><button type="button" class="btn-accent small hidden" id="msgClosedTrust">Approve Always-On Access</button></div>
                         <form class="msg-compose hidden" id="msgCompose" autocomplete="off">
+                            <button type="button" class="msg-ai-btn hidden" id="msgAiDraft" title="Let the AI assistant draft a reply to the last message">&#10022; Draft reply</button>
                             <textarea id="msgInput" rows="1" maxlength="2000" placeholder="Write a message..." aria-label="Message"></textarea>
                             <button type="submit" class="chat-send" id="msgSend" aria-label="Send">&#10148;</button>
                         </form>
-                        <p class="msg-closed hidden" id="msgClosed" role="note"></p>
                     </section>
                 </div>
             </div>
@@ -564,7 +566,7 @@
                     <div>
                         <p class="eyebrow">Your follow-ups</p>
                         <h1 class="page-title">Boards</h1>
-                        <p class="page-sub">Your own to-do board. Drag cards between columns, tick them off, or switch to a list. Only you can see it.</p>
+                        <p class="page-sub" id="boardSub">A simple to-do list for the things around your support work: what to check, who to call, what is done. Only you can see it.</p>
                     </div>
                     <div class="page-actions">
                         <div class="seg" role="tablist" aria-label="Board view">
@@ -574,10 +576,37 @@
                     </div>
                 </header>
                 <form class="board-add" id="boardAddForm" autocomplete="off">
-                    <input type="text" id="boardAddTitle" maxlength="140" placeholder="Add a card, e.g. Check invoice export after the vendor's fix" aria-label="New card title">
-                    <select id="boardAddPriority" aria-label="Priority"><option value="normal">Normal</option><option value="high">High</option><option value="low">Low</option></select>
+                    <span class="board-add-plus" aria-hidden="true">+</span>
+                    <input type="text" id="boardAddTitle" maxlength="140" placeholder="What do you need to remember? e.g. Check the invoice export after the fix" aria-label="New card title">
+                    <select id="boardAddTicket" aria-label="Link to a ticket (optional)"><option value="">No ticket</option></select>
+                    <select id="boardAddPriority" aria-label="Priority"><option value="normal">Normal</option><option value="high">High priority</option><option value="low">Low priority</option></select>
                     <button type="submit" class="btn-accent">Add card</button>
                 </form>
+                <div class="board-tools hidden" id="boardTools" role="search" aria-label="Filter cards">
+                    <div class="board-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="search" id="boardSearch" placeholder="Filter cards" aria-label="Filter cards by text" autocomplete="off"></div>
+                    <select id="boardFilterPrio" aria-label="Filter by priority"><option value="">Any priority</option><option value="high">High only</option><option value="normal">Normal only</option><option value="low">Low only</option></select>
+                    <select id="boardFilterTicket" aria-label="Filter by ticket"><option value="">All tickets</option></select>
+                    <label class="board-toggle"><input type="checkbox" id="boardHideDone"><span>Hide done</span></label>
+                    <span class="board-count" id="boardCount" aria-live="polite"></span>
+                    <button type="button" class="btn-link hidden" id="boardClearFilters">Clear filters</button>
+                    <span class="board-keys muted" title="Keyboard">Tip: select a card, then &larr; &rarr; to move, Space to tick, Enter to rename</span>
+                </div>
+                <div class="board-undo hidden" id="boardUndo" role="status"><span id="boardUndoText"></span><button type="button" class="btn-link" id="boardUndoBtn">Undo</button></div>
+                <section class="board-welcome hidden" id="boardWelcome" aria-labelledby="boardWelcomeTitle">
+                    <div class="board-welcome-text">
+                        <h2 id="boardWelcomeTitle">Keep track of your support follow-ups</h2>
+                        <p class="muted" id="boardWelcomeSub">Write down what you need to do around a ticket, move it along as you work, and tick it off when it is done.</p>
+                        <ol class="board-steps">
+                            <li><span>1</span><div><strong>Add a card</strong><small>Type it above and press Enter. Link it to a ticket if you like.</small></div></li>
+                            <li><span>2</span><div><strong>Move it along</strong><small>Drag it to "In progress" when you start.</small></div></li>
+                            <li><span>3</span><div><strong>Tick it off</strong><small>Click the circle and it moves to "Done".</small></div></li>
+                        </ol>
+                    </div>
+                    <div class="board-starters">
+                        <p class="board-starters-label">Start with one of these</p>
+                        <div class="board-starter-list" id="boardStarters"></div>
+                    </div>
+                </section>
                 <div id="boardKanban" class="kanban"></div>
                 <div id="boardList" class="board-list hidden"></div>
             </div>
@@ -836,8 +865,9 @@
             <button type="button" id="btnChatClear" class="chat-icon-btn" aria-label="Start a new conversation" title="New conversation">&#8635;</button>
             <button type="button" id="btnChatClose" class="chat-icon-btn" aria-label="Close assistant" title="Close">&times;</button>
         </header>
+        <div id="chatContext" class="chat-context hidden"><label for="chatContextSel">About</label><select id="chatContextSel" aria-label="Which ticket the answers are about"></select></div>
         <div id="chatLog" class="chat-log" role="log" aria-live="polite"></div>
-        <div id="chatSuggestions" class="chat-suggestions" aria-label="Suggested questions"></div>
+        <div id="chatSuggestions" class="chat-suggestions" aria-label="Quick actions"></div>
         <div id="chatLocked" class="chat-locked hidden">
             <div class="chat-locked-icon" aria-hidden="true">&#128274;</div>
             <p id="chatLockedText">The AI assistant is part of Membership.</p>
@@ -925,10 +955,10 @@
     <script src="remote-input.js?v=20261031a"></script>
     <script src="webrtc.js?v=20261105a"></script>
     <script src="desktop-bridge.js?v=20261105a"></script>
-    <script src="membership.js?v=20261105c"></script>
-    <script src="messages.js?v=20261106a"></script>
-    <script src="workspace.js?v=20261106a"></script>
-    <script src="script.js?v=20261106v16"></script>
-    <script src="build-check.js?v=20261106v16"></script>
+    <script src="membership.js?v=20261106v17"></script>
+    <script src="messages.js?v=20261106v17"></script>
+    <script src="workspace.js?v=20261106v17"></script>
+    <script src="script.js?v=20261106v17"></script>
+    <script src="build-check.js?v=20261106v17"></script>
 </body>
 </html>

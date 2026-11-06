@@ -152,14 +152,17 @@ function loadServer({ env = {}, fetch } = {}) {
   }
 
   // Runs one request through the real route handlers (auth middleware included)
-  function call(method, url, { user, body, token } = {}) {
+  function call(method, url, { user, body, token, onWrite } = {}) {
     const route = stubs.routes.find((r) => r.method === method && match(r.path, url));
     if (!route) throw new Error(`no route ${method} ${url}`);
     const query = Object.fromEntries(new URLSearchParams(url.split('?')[1] || ''));
     const auth = token || (user ? tokenFor(user) : '');
     return new Promise((resolve, reject) => {
-      const req = { method, originalUrl: url, headers: auth ? { authorization: `Bearer ${auth}` } : {}, body: body || {}, query, params: match(route.path, url), ip: '127.0.0.1' };
-      const res = { statusCode: 200, headers: {}, status(c) { this.statusCode = c; return this; }, setHeader(k, v) { this.headers[k] = v; }, json(b) { resolve({ status: this.statusCode, body: b }); } };
+      const req = { method, originalUrl: url, headers: auth ? { authorization: `Bearer ${auth}` } : {}, body: body || {}, query, params: match(route.path, url), ip: '127.0.0.1', on() {} };
+      // json() answers at once; write()/end() collect a streamed answer (Server-Sent Events) into `text`
+      const res = { statusCode: 200, headers: {}, chunks: [], status(c) { this.statusCode = c; return this; }, setHeader(k, v) { this.headers[k] = v; }, flushHeaders() {},
+        json(b) { resolve({ status: this.statusCode, body: b }); }, write(c) { this.chunks.push(String(c)); if (onWrite) onWrite(String(c), this); return true; },
+        end(c) { if (c) this.chunks.push(String(c)); resolve({ status: this.statusCode, headers: this.headers, text: this.chunks.join(''), chunks: this.chunks }); } };
       const run = (i) => { try { const out = route.handlers[i](req, res, () => run(i + 1)); if (out && out.catch) out.catch(reject); } catch (e) { reject(e); } };
       run(0);
     });

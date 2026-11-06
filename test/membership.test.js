@@ -123,8 +123,8 @@ test('an expired membership falls back to the free plan', async () => {
   assert.equal((await ask(c)).status, 402);
 });
 
-test('vendors cannot use the assistant or buy a membership', async () => {
-  assert.equal((await ask(vendor)).status, 403);
+test('vendors get the assistant (no plan needed) but cannot buy a membership', async () => {
+  assert.equal((await ask(vendor)).status, 200);
   assert.equal((await h.call('POST', '/api/membership/checkout', { user: vendor, body: { plan: 'monthly' } })).status, 403);
 });
 
@@ -138,7 +138,8 @@ test('assistant provider: a Gemini key uses the free Gemini endpoint; Gemini win
   assert.match(seen[0].url, /generativelanguage\.googleapis\.com/);
   assert.equal(seen[0].auth, 'Bearer AIzaTEST');
   assert.equal(seen[0].body.model, 'gemini-2.5-flash');
-  assert.equal(seen[0].body.max_tokens, 800);
+  assert.equal(seen[0].body.max_tokens, 700);
+  assert.equal(seen[0].body.reasoning_effort, 'none', 'no slow "thinking" on Gemini Flash');
   const o = createAssistant({ env: { OPENAI_API_KEY: 'sk-x' }, fetchImpl: f, log: quiet });
   assert.equal(o.provider, 'openai');
   await o.reply([{ role: 'user', content: 'hi' }]);

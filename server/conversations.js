@@ -4,9 +4,10 @@
  *
  * Who may talk: ONLY the ticket's client and the one vendor account it was sent to (tasks.assigned_vendor_user_id).
  *   - read the conversation : always (both parties)
- *   - send a message        : while the ticket is waiting / live, and for 7 days after its time window ended
- *   - call                  : while the ticket is waiting / live
- *   - a vendor the client blocked can neither message nor call
+ *   - text and call         : only during the ticket's time window (status waiting / live)
+ *   - "Always-On Access" (VIP): a vendor the client approved (client_vendor_contacts) may text and call that client at any time,
+ *                             on any of their conversations, also after the ticket ended. Only the client grants or removes it.
+ *   - a vendor the client blocked can neither message nor call (blocking always wins over approval)
  * Every REST call and every socket event is checked against the database; nothing the browser says about "who" is trusted.
  *
  * Calls are WebRTC audio, peer to peer. The server only relays the offer / answer / ICE candidates, and only between the two
@@ -15,7 +16,6 @@
  */
 const crypto = require('crypto');
 
-const SEND_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 const RING_MS = 40000;
 const MAX_BODY = 2000;
 const MAX_SIGNAL = 20000;
@@ -27,6 +27,17 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
   const toSocket = (id, ev, payload) => { if (id) io.to(id).emit(ev, payload); };
 
   /** Is this user one of the two parties of the ticket, and what may they do? null = not a party. */
+  // Texting and calling are open only while the ticket's time window runs (waiting or live, and not past its end time),
+  // unless the client approved this vendor for Always-On Access.
+  function inWindow(t) {
+    if (t.status !== 'pending' && t.status !== 'active') return false;
+    if (!t.window_end) return true;
+    const end = parseDbDate(t.window_end);
+    return !(end instanceof Date) || Number.isNaN(end.getTime()) || end.getTime() > now();
+  }
+  const LOCKED_CLIENT = 'Locked: texting and calling are available only during an active task. Approve this vendor for Always-On Access to talk any time.';
+  const LOCKED_VENDOR = 'Locked: texting and calling are available only during an active task. The client can approve you for Always-On Access.';
+
   async function access(user, taskId) {
     const id = Number(taskId);
     if (!Number.isInteger(id)) return null;
@@ -42,21 +53,50 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
     else if (user.role === 'vendor' && task.assigned_vendor_user_id === user.userId) role = 'vendor';
     if (!role) return null;
     const blocked = await isVendorBlocked(task.client_id, task.assigned_vendor_user_id);
-    const open = task.status === 'pending' || task.status === 'active';
-    const end = parseDbDate(task.window_end).getTime();
-    const recent = Number.isFinite(end) && now() - end < SEND_GRACE_MS;
-    const canSend = !blocked && (open || recent);
-    const canCall = !blocked && open;
+    const trusted = await isTrusted(task.client_id, task.assigned_vendor_user_id);
+    const open = inWindow(task);
+    const canSend = !blocked && (open || trusted);
+    const canCall = canSend;
     const why = blocked ? 'The client has ended this vendor\'s access.'
-      : !canSend ? 'This conversation is closed: the ticket ended more than 7 days ago.'
-      : !canCall ? 'Calls are only possible while the ticket is waiting or live.' : '';
+      : canSend ? ''
+      : role === 'client' ? LOCKED_CLIENT
+      : LOCKED_VENDOR;
     return {
-      task, role, canSend, canCall, why,
+      task, role, canSend, canCall, why, trusted, open,
       meId: user.userId,
       otherId: role === 'client' ? task.assigned_vendor_user_id : task.client_id,
+      vendorId: task.assigned_vendor_user_id,
       otherName: role === 'client' ? task.vendor_name : task.client_name,
       myName: role === 'client' ? task.client_name : task.vendor_name
     };
+  }
+
+  async function isTrusted(clientId, vendorId) {
+    const r = await db.get('SELECT 1 AS ok FROM client_vendor_contacts WHERE client_id = ? AND vendor_user_id = ?', [clientId, vendorId]);
+    return !!r;
+  }
+  /** The client approves (or stops approving) a vendor as an anytime contact. Both sides' open pages are told at once. */
+  async function setTrusted(clientUser, vendorId, on) {
+    const vid = Number(vendorId);
+    const vendor = Number.isInteger(vid) ? await db.get("SELECT id FROM users WHERE id = ? AND role = 'vendor'", [vid]) : null;
+    if (!vendor) return { status: 404, error: 'Vendor not found.' };
+    // only a vendor this client actually works with (has sent a ticket to)
+    const works = await db.get('SELECT 1 AS ok FROM tasks WHERE client_id = ? AND assigned_vendor_user_id = ? LIMIT 1', [clientUser.userId, vid]);
+    if (!works) return { status: 404, error: 'You have no tickets with this vendor.' };
+    if (on) await db.run('INSERT OR IGNORE INTO client_vendor_contacts (client_id, vendor_user_id) VALUES (?, ?)', [clientUser.userId, vid]);
+    else await db.run('DELETE FROM client_vendor_contacts WHERE client_id = ? AND vendor_user_id = ?', [clientUser.userId, vid]);
+    if (!on) for (const call of [...calls.values()]) {
+      // contact taken back: a call on an ENDED ticket between them stops now (calls on a running ticket stay)
+      if (call.clientId === clientUser.userId && call.vendorId === vid) {
+        const t = await db.get('SELECT status FROM tasks WHERE id = ?', [call.taskId]);
+        if (!t || !['pending', 'active'].includes(t.status)) finish(call, 'contact-removed', clientUser.userId);
+      }
+    }
+    const payload = { vendorId: vid, clientId: clientUser.userId, trusted: !!on };
+    emitToUser(clientUser.userId, 'contact-changed', payload);
+    emitToUser(vid, 'contact-changed', payload);
+    logAudit(clientUser.userId, on ? 'CONTACT_APPROVED' : 'CONTACT_REMOVED', { vendorId: vid });
+    return { status: 200, trusted: !!on };
   }
 
   const row = (m) => ({ id: m.id, taskId: m.task_id, senderId: m.sender_id, kind: m.kind, body: m.body, createdAt: m.created_at, readAt: m.read_at });
@@ -82,20 +122,22 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
              (SELECT m.kind FROM task_messages m WHERE m.task_id = t.id ORDER BY m.id DESC LIMIT 1) AS last_kind,
              (SELECT m.sender_id FROM task_messages m WHERE m.task_id = t.id ORDER BY m.id DESC LIMIT 1) AS last_sender,
              (SELECT m.created_at FROM task_messages m WHERE m.task_id = t.id ORDER BY m.id DESC LIMIT 1) AS last_at,
-             (SELECT COUNT(*) FROM task_messages m WHERE m.task_id = t.id AND m.sender_id <> ? AND m.read_at IS NULL) AS unread
+             (SELECT COUNT(*) FROM task_messages m WHERE m.task_id = t.id AND m.sender_id <> ? AND m.read_at IS NULL) AS unread,
+             EXISTS (SELECT 1 FROM client_vendor_contacts k WHERE k.client_id = t.client_id AND k.vendor_user_id = t.assigned_vendor_user_id) AS trusted,
+             EXISTS (SELECT 1 FROM client_vendor_blocks b WHERE b.client_id = t.client_id AND b.vendor_user_id = t.assigned_vendor_user_id) AS blocked
       FROM tasks t LEFT JOIN users cu ON cu.id = t.client_id LEFT JOIN users vu ON vu.id = t.assigned_vendor_user_id
       WHERE ${mine} AND t.assigned_vendor_user_id IS NOT NULL
       ORDER BY COALESCE(last_at, t.created_at) DESC LIMIT 200`, [user.userId, user.userId]);
-    const t = now();
     return rows.map((r) => {
-      const end = parseDbDate(r.window_end).getTime();
-      const open = r.status === 'pending' || r.status === 'active';
+      const open = inWindow(r);
+      const can = !r.blocked && (open || !!r.trusted);
       return {
         taskId: r.id, title: r.title, status: r.status,
         otherName: user.role === 'client' ? r.vendor_name : r.client_name,
         lastBody: r.last_body || '', lastKind: r.last_kind || null, lastMine: r.last_sender === user.userId, lastAt: r.last_at || null,
         createdAt: r.created_at, unread: Number(r.unread) || 0,
-        canSend: open || (Number.isFinite(end) && t - end < SEND_GRACE_MS), canCall: open
+        vendorId: r.assigned_vendor_user_id, trusted: !!r.trusted, open,
+        canSend: can, canCall: can, windowEnd: r.window_end || null
       };
     });
   }
@@ -229,7 +271,7 @@ function createConversations({ db, io, emitToUser, isVendorBlocked, parseDbDate,
     for (const call of [...calls.values()]) if (call.taskId === Number(taskId)) finish(call, reason);
   }
 
-  return { access, list, messages, send, markRead, unreadTotal, registerBrowser, endCallsForTask, activeCalls: () => calls.size, RING_MS };
+  return { access, list, messages, send, markRead, unreadTotal, registerBrowser, endCallsForTask, setTrusted, isTrusted, activeCalls: () => calls.size, RING_MS };
 }
 
-module.exports = { createConversations, SEND_GRACE_MS };
+module.exports = { createConversations };

@@ -49,17 +49,37 @@ test('messages: the two parties talk in real time; nobody else can read or write
   assert.equal((await h.call('POST', `/api/tasks/${t.task.id}/messages`, { user: t.client, body: { body: '   ' } })).status, 400);
 });
 
-test('messages: allowed for 7 days after a ticket ends, then closed; calls only while waiting or live; blocked vendor is silent', async () => {
+test('messages: only during the ticket window; an "Anytime contact" vendor can text and call any time; blocking wins', async () => {
   const t = await ticket('b', { status: 'completed' });
-  assert.equal((await h.call('POST', `/api/tasks/${t.task.id}/messages`, { user: t.vendor, body: { body: 'Did the fix hold?' } })).status, 201);
-  const ring = await t.vs.call('call-invite', { taskId: t.task.id });
-  assert.equal(ring.ok, false); assert.match(ring.error, /waiting or live/);
-  await h.db.run('UPDATE tasks SET window_end = ? WHERE id = ?', [new Date(Date.now() - 8 * 86400000).toISOString(), t.task.id]);
-  const late = await h.call('POST', `/api/tasks/${t.task.id}/messages`, { user: t.vendor, body: { body: 'still there?' } });
-  assert.equal(late.status, 403); assert.match(late.body.error, /closed/);
-  assert.equal((await h.call('GET', `/api/tasks/${t.task.id}/messages`, { user: t.client })).status, 200, 'history stays readable');
+  const closed = await h.call('POST', `/api/tasks/${t.task.id}/messages`, { user: t.vendor, body: { body: 'Did the fix hold?' } });
+  assert.equal(closed.status, 403); assert.match(closed.body.error, /client can approve you for Always-On Access/);
+  assert.equal((await t.vs.call('call-invite', { taskId: t.task.id })).ok, false);
+  const view = await h.call('GET', `/api/tasks/${t.task.id}/messages`, { user: t.client });
+  assert.equal(view.status, 200, 'history stays readable');
+  assert.equal(view.body.canSend, false); assert.match(view.body.why, /Always-On Access/);
 
+  // only the client can approve, only a vendor they work with
+  assert.equal((await h.call('PUT', `/api/vendors/${t.vendor.id}/contact`, { user: t.vendor })).status, 403);
+  const stranger = await h.addUser('mv_unrelated', 'vendor');
+  assert.equal((await h.call('PUT', `/api/vendors/${stranger.id}/contact`, { user: t.client })).status, 404);
+  assert.equal((await h.call('PUT', `/api/vendors/${t.vendor.id}/contact`, { user: t.client })).status, 200);
+  assert.equal(got(t.vs, 'contact-changed').at(-1).p.trusted, true, 'the vendor is told at once');
+
+  assert.equal((await h.call('POST', `/api/tasks/${t.task.id}/messages`, { user: t.vendor, body: { body: 'Did the fix hold?' } })).status, 201);
+  const conv = (await h.call('GET', '/api/conversations', { user: t.vendor })).body.conversations.find((c) => c.taskId === t.task.id);
+  assert.equal(conv.trusted, true); assert.equal(conv.canCall, true);
+  const inv = await t.vs.call('call-invite', { taskId: t.task.id });
+  assert.equal(inv.ok, true, 'approved contact can call after the ticket ended');
+  await t.cs.call('call-accept', { callId: inv.callId });
+
+  // taking it back closes the conversation again and hangs up a call on the ended ticket
+  assert.equal((await h.call('DELETE', `/api/vendors/${t.vendor.id}/contact`, { user: t.client })).status, 200);
+  assert.equal(got(t.vs, 'call-ended').at(-1).p.reason, 'contact-removed');
+  assert.equal((await h.call('POST', `/api/tasks/${t.task.id}/messages`, { user: t.vendor, body: { body: 'hello?' } })).status, 403);
+
+  // blocking always wins over approval
   const b = await ticket('c');
+  await h.call('PUT', `/api/vendors/${b.vendor.id}/contact`, { user: b.client });
   await h.call('POST', `/api/vendors/${b.vendor.id}/terminate`, { user: b.client, body: { reason: 'done' } });
   assert.equal((await h.call('POST', `/api/tasks/${b.task.id}/messages`, { user: b.vendor, body: { body: 'hello?' } })).status, 403);
   assert.equal((await b.vs.call('call-invite', { taskId: b.task.id })).ok, false);
@@ -126,4 +146,18 @@ test('kill switch: terminating the ticket hangs up its call at once; call config
   assert.equal(got(t.vs, 'call-ended').at(-1).p.reason, 'session-ended');
   assert.equal(got(t.cs, 'call-ended').at(-1).p.reason, 'session-ended');
   assert.equal((await t.vs.call('call-invite', { taskId: t.task.id })).ok, false, 'no new call on a terminated ticket');
+});
+
+test('messages: a ticket whose time window has run out is locked even before its status changes; Always-On Access still works', async () => {
+  const t = await ticket('w', { status: 'active' });
+  const open = await h.call('GET', `/api/tasks/${t.task.id}/messages`, { user: t.vendor });
+  assert.equal(open.body.canSend, true); assert.ok(open.body.windowEnd, 'the page gets the end time so it can lock itself');
+  await h.db.run("UPDATE tasks SET window_end = datetime('now', '-1 minute') WHERE id = ?", [t.task.id]);
+  const late = await h.call('POST', `/api/tasks/${t.task.id}/messages`, { user: t.vendor, body: { body: 'still there?' } });
+  assert.equal(late.status, 403); assert.match(late.body.error, /only during an active task/);
+  assert.equal((await t.cs.call('call-invite', { taskId: t.task.id })).ok, false);
+  const conv = (await h.call('GET', '/api/conversations', { user: t.client })).body.conversations.find((c) => c.taskId === t.task.id);
+  assert.equal(conv.canSend, false); assert.equal(conv.open, false);
+  assert.equal((await h.call('PUT', `/api/vendors/${t.vendor.id}/contact`, { user: t.client })).status, 200);
+  assert.equal((await h.call('POST', `/api/tasks/${t.task.id}/messages`, { user: t.vendor, body: { body: 'still there?' } })).status, 201);
 });
