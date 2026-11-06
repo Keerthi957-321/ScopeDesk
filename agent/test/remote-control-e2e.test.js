@@ -361,12 +361,31 @@ test('e2e Calculator (Windows Store app): the vendor types 12+7 and presses Ente
     h.server('remote-input', { t: 'text', s: '12+7' });
     h.server('remote-input', { t: 'key', k: 'Enter', d: true, o: 'mac' });
     h.server('remote-input', { t: 'key', k: 'Enter', d: false, o: 'mac' });
-    await h.waitFor(() => h.os().some((o) => o.op === 'type'));
+    await h.waitFor(() => h.os().filter((o) => o.op === 'keydown').length >= 5);
     await h.waitFor(() => diags().some((d) => d.applied >= 4));
-    const typed = h.os().filter((o) => o.op === 'type');
-    assert.ok(typed.length >= 1, 'typed text reached the OS');
+    // Calculator ignores "typed text": 12+7 must arrive as REAL key presses (top-row digits, keypad +), then Enter
+    const downs = h.os().filter((o) => o.op === 'keydown').map((o) => o.k);
+    assert.deepEqual(downs.slice(-5), ['Key:Num1', 'Key:Num2', 'Key:Add', 'Key:Num7', 'Key:Enter']);
+    assert.equal(h.os().filter((o) => o.op === 'type').length, 0, 'nothing went as unicode text');
     assert.ok(h.os().some((o) => o.op === 'press'), 'click reached the OS');
     const last = diags().at(-1);
     assert.equal(last.inputReady, true); assert.ok(last.lastApplied >= 0 && last.lastApplied <= last.lastRefused, 'the latest action was applied');
+  } finally { h.done(); }
+});
+
+test('e2e typing: letters and accents still arrive as text, digits and symbols as real keys, in the right order', async () => {
+  const h = rig({ hello: { allowedApps: ['Notepad'], targetProcess: 'Notepad' } });
+  try {
+    h.runner.init({ taskId: 8, token: 'a.b.c', manual: true });
+    await h.waitFor(() => h.runner.status().phase === 'running');
+    h.fg({ owner: { name: 'notepad.exe', path: 'C:\\Windows\\notepad.exe' }, title: 'Untitled - Notepad', id: 9 });
+    await h.waitFor(() => h.runner.status().uiState === 'armed');
+    h.server('remote-input', { t: 'text', s: 'Total' });
+    h.server('remote-input', { t: 'text', s: '=' });
+    h.server('remote-input', { t: 'text', s: '\u20b9' });
+    h.server('remote-input', { t: 'text', s: '5' });
+    await h.waitFor(() => h.os().filter((o) => o.op === 'keydown').length >= 2 && h.os().filter((o) => o.op === 'type').length >= 2);
+    const seq = h.os().filter((o) => o.op === 'type' || o.op === 'keydown').map((o) => (o.op === 'type' ? `text:${o.s}` : o.k));
+    assert.deepEqual(seq, ['text:Total', 'Key:Equal', 'text:\u20b9', 'Key:Num5']);
   } finally { h.done(); }
 });

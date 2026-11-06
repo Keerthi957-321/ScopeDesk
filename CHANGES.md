@@ -1,3 +1,11 @@
+# Update 20 (build 2026-11-07-v20): the vendor can TYPE into Calculator (and other apps that ignore typed text)
+
+| Change | Files |
+|---|---|
+| FIX typing: printable characters were injected as Unicode text. Text boxes accept that, but Windows Calculator (and other apps that read raw key presses) silently ignore it, so the vendor could click but not type. Digits and + - * / . = , are now pressed as REAL keys (top-row digits, keypad operators that work with Num Lock on or off); letters, accents and symbols such as the rupee sign stay text so any keyboard layout types them correctly | `agent/input-injector.js` |
+| After a click, the next key is judged on a fresh look at the app in front (no 150 ms cached answer) | `agent/input-injector.js` |
+| Tests: "12+7, Enter" arrives as real key presses; mixed text keeps its order | `agent/test/remote-control-e2e.test.js` |
+
 # Update 19 (build 2026-11-06-v19): calls work between any two networks; vendor sees exactly what happens to every click and key
 
 | Change | Files |

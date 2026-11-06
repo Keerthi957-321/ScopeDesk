@@ -10,7 +10,9 @@
 //   Mac vendor -> Mac Client           : Command is Command.
 //   The Windows / Super key itself is never pressed on Windows/Linux.
 // Printable characters arrive as text ('text') and are typed as characters, so a different keyboard layout or OS cannot turn
-// "é" or "@" into a different key.
+// "é" or "@" into a different key. EXCEPT digits and the calculator symbols (+ - * / . = ,): those are pressed as REAL keys.
+// Typing a character as text uses the OS "Unicode packet" input, which text boxes accept but apps that read raw key presses
+// (Windows Calculator, many Store apps and games) silently ignore: the vendor could click but not type into Calculator.
 //
 // Shortcuts that would leave the approved apps or end ScopeDesk are dropped on every OS:
 //   Alt+Tab, Alt+F4, Alt+Esc, Ctrl+Esc (Start menu), Ctrl+Shift+Esc (Task Manager), Cmd+Tab, Cmd+Space (Spotlight), Cmd+Q,
@@ -51,6 +53,13 @@ function buildKeyMap(Key) {
   add('MetaRight', 'RightCmd', 'RightSuper', 'RightWin');
   return map;
 }
+
+// Characters pressed as real keys (layout-safe on US / UK / Indian keyboards; operators on the numeric keypad, which needs no
+// Shift and works with Num Lock on or off). Everything else is typed as a character.
+const TEXT_KEYS = {
+  0: 'Digit0', 1: 'Digit1', 2: 'Digit2', 3: 'Digit3', 4: 'Digit4', 5: 'Digit5', 6: 'Digit6', 7: 'Digit7', 8: 'Digit8', 9: 'Digit9',
+  '+': 'NumpadAdd', '-': 'NumpadSubtract', '*': 'NumpadMultiply', '/': 'NumpadDivide', '.': 'Period', '=': 'Equal', ',': 'Comma'
+};
 
 const CTRL = new Set(['ControlLeft', 'ControlRight']);
 const META = new Set(['MetaLeft', 'MetaRight', 'OSLeft', 'OSRight']);
@@ -195,7 +204,7 @@ class InputInjector {
     const { mouse, Button } = nut;
 
     if (event.t === 'key') return this.applyKey(event);
-    if (event.t === 'text') return nut.keyboard.type(event.s);
+    if (event.t === 'text') return this.typeText(event.s);
     if (event.t === 'clip') return this.paste(event);
 
     if (event.t === 'wheel') {
@@ -220,7 +229,25 @@ class InputInjector {
       const button = [Button.LEFT, Button.MIDDLE, Button.RIGHT][event.b];
       if (event.t === 'down') { await mouse.pressButton(button); this.buttons.add(button); }
       else { await mouse.releaseButton(button); this.buttons.delete(button); }
+      // the click may have brought another app to the front: judge the very next key on a fresh look, not a cached one
+      if (this.monitor && this.monitor.cache) this.monitor.cache.at = 0;
     }
+  }
+
+  // Type the vendor's characters: real key presses where an app may need them (digits, + - * / . = ,), text for the rest
+  async typeText(s) {
+    if (!this.keyMap) this.keyMap = buildKeyMap(nut.Key);
+    let buf = '';
+    const flush = async () => { if (buf) { const t = buf; buf = ''; await nut.keyboard.type(t); } };
+    for (const ch of String(s)) {
+      const code = TEXT_KEYS[ch];
+      const key = code ? this.keyMap[code] : undefined;
+      if (key === undefined) { buf += ch; continue; }
+      await flush();
+      await nut.keyboard.pressKey(key);
+      await nut.keyboard.releaseKey(key);
+    }
+    await flush();
   }
 
   // Vendor asked to open a folder. The check is case-insensitive (policy.js normalises "C:\\BillingData", "c:\\billingdata", ...)

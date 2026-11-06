@@ -58,7 +58,7 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const BUILD = '2026-11-06-v19'; // shown on the page so you can tell which version you are looking at
+const BUILD = '2026-11-07-v20'; // shown on the page so you can tell which version you are looking at
 const APP_URL = (process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`)).replace(/\/+$/, '');
 if (IS_PRODUCTION) app.set('trust proxy', 1); // behind Railway's proxy: real client IPs for rate limits
 
