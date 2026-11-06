@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-11-06-v17';
+window.SCOPEDESK_BUILD = '2026-11-06-v17b';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 

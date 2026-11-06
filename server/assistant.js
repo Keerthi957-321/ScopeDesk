@@ -69,9 +69,32 @@ function cleanMessages(list) {
   return { messages: out };
 }
 
+// Find the API key even when the variable name is slightly off (a stray space, lower case, GOOGLE_API_KEY, GEMINI_KEY),
+// or a Gemini key was saved under OPENAI_API_KEY. Returns a note saying what was done, for the server log.
+function findKeys(env) {
+  const vars = {};
+  for (const [k, v] of Object.entries(env || {})) {
+    const name = String(k).trim().toUpperCase().replace(/[\s-]+/g, '_');
+    const val = String(v == null ? '' : v).trim().replace(/^["']|["']$/g, '').trim();
+    if (val && !vars[name]) vars[name] = { raw: k, val };
+  }
+  const pick = (...names) => { for (const n of names) if (vars[n]) return vars[n]; return null; };
+  const g = pick('GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_KEY', 'GOOGLE_GEMINI_API_KEY', 'GOOGLE_AI_API_KEY');
+  const o = pick('OPENAI_API_KEY', 'OPENAI_KEY');
+  let geminiKey = g ? g.val : '', openaiKey = o ? o.val : '', note = '';
+  if (g && g.raw !== 'GEMINI_API_KEY') note = `Using the Gemini key from the variable "${g.raw}". Renaming it to GEMINI_API_KEY is recommended.`;
+  if (!geminiKey && /^(AIza|AQ\.)/.test(openaiKey)) { geminiKey = openaiKey; openaiKey = ''; note = 'OPENAI_API_KEY holds a Google Gemini key; using it with Gemini. Renaming it to GEMINI_API_KEY is recommended.'; }
+  if (!geminiKey && !openaiKey) {
+    const near = Object.keys(env || {}).filter((k) => /GEMINI|OPENAI|GOOGLE.*KEY|API_?KEY/i.test(k));
+    note = near.length ? `No usable AI key. Variables that look related: ${near.map((k) => JSON.stringify(k) + (String(env[k] || '').trim() ? '' : ' (empty)')).join(', ')}.`
+      : 'No AI key: GEMINI_API_KEY is not set on this server (Railway > your service > Variables, then Deploy).';
+  }
+  return { geminiKey, openaiKey, note };
+}
+
 function createAssistant({ env = process.env, fetchImpl = globalThis.fetch, log = console } = {}) {
-  const geminiKey = String(env.GEMINI_API_KEY || '').trim();
-  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  const { geminiKey, openaiKey, note } = findKeys(env);
+  if (note && log && log.warn) log.warn(`[AI] ${note}`);
   const providerKey = geminiKey ? 'gemini' : openaiKey ? 'openai' : null;
   const provider = providerKey ? PROVIDERS[providerKey] : null;
   const apiKey = geminiKey || openaiKey;
@@ -258,4 +281,4 @@ function createAssistant({ env = process.env, fetchImpl = globalThis.fetch, log 
   };
 }
 
-module.exports = { createAssistant, cleanMessages, SYSTEM_PROMPT, VENDOR_PROMPT };
+module.exports = { createAssistant, findKeys, cleanMessages, SYSTEM_PROMPT, VENDOR_PROMPT };
