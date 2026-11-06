@@ -46,7 +46,10 @@
       "validate.js",
       "config.js",
       "splash.html",
-      "package.json"
+      "package.json",
+      "mini-bar.html",
+      "mini-bar.js",
+      "mini-preload.js"
     ],
     "extraResources": [
       {

@@ -389,3 +389,42 @@ test('e2e typing: letters and accents still arrive as text, digits and symbols a
     assert.deepEqual(seq, ['text:Total', 'Key:Equal', 'text:\u20b9', 'Key:Num5']);
   } finally { h.done(); }
 });
+
+test('e2e ScopeDesk maximised behind Calculator: clicks ON Calculator go through (only clicks that land on ScopeDesk are dropped), and keys follow', async () => {
+  const h = rig({ hello: { allowedApps: ['Calculator'], targetProcess: 'Calculator' } });
+  try {
+    h.runner.init({ taskId: 9, token: 'a.b.c', manual: true });
+    await h.waitFor(() => h.runner.status().phase === 'running');
+    h.runner.setOwnWindow({ x: 0, y: 0, width: 1920, height: 1040 });          // ScopeDesk maximised: covers the whole screen
+    await tick(100);
+    // ScopeDesk in front: a click on it is dropped (the vendor must never press the Client's Stop / Terminate)
+    h.fg({ owner: { name: 'ScopeDesk', path: 'C:\\Program Files\\ScopeDesk\\ScopeDesk.exe' }, title: 'ScopeDesk', id: 1 });
+    await tick(150);
+    h.server('remote-input', { t: 'down', x: 0.5, y: 0.5, b: 0 });
+    h.server('remote-input', { t: 'up', x: 0.5, y: 0.5, b: 0 });
+    await tick(150);
+    assert.equal(h.os().filter((o) => o.op === 'press').length, 0, 'click on ScopeDesk dropped');
+    // Calculator now in front, lying INSIDE ScopeDesk's rectangle (on top of it)
+    h.fg({ owner: { name: 'Application Frame Host', path: 'C:\\Windows\\System32\\ApplicationFrameHost.exe' }, title: 'Calculator', id: 5, bounds: { x: 700, y: 200, width: 400, height: 600 } });
+    await h.waitFor(() => h.runner.status().uiState === 'armed');
+    h.server('remote-input', { t: 'down', x: 0.47, y: 0.45, b: 0 });          // (902, 467): on Calculator
+    h.server('remote-input', { t: 'up', x: 0.47, y: 0.45, b: 0 });
+    h.server('remote-input', { t: 'text', s: '9' });
+    await h.waitFor(() => h.os().some((o) => o.op === 'press') && h.os().some((o) => o.op === 'keydown' && o.k === 'Key:Num9'));
+    // outside Calculator but on ScopeDesk: still dropped
+    const before = h.os().filter((o) => o.op === 'press').length;
+    h.server('remote-input', { t: 'down', x: 0.05, y: 0.05, b: 0 });
+    await tick(200);
+    assert.equal(h.os().filter((o) => o.op === 'press').length, before, 'a click that would land on ScopeDesk is still dropped');
+  } finally { h.done(); }
+});
+
+test('e2e when remote control starts, the approved app is brought to the front', async () => {
+  const h = rig({ hello: { allowedApps: ['Calculator'], targetProcess: 'Calculator' }, env: { HARNESS_TITLE: 'Calculator' } });
+  try {
+    h.runner.init({ taskId: 10, token: 'a.b.c', manual: true });
+    await h.waitFor(() => h.runner.status().phase === 'running');
+    h.fg({ owner: { name: 'ScopeDesk', path: '' }, title: 'ScopeDesk', id: 1 });
+    await h.waitFor(() => h.os().some((o) => o.op === 'focus' && o.handle === 4242), 4000);
+  } finally { h.done(); }
+});

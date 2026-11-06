@@ -58,7 +58,7 @@ const fakeNut = {
   keyboard: { config: {}, pressKey: async (k) => op('keydown', { k }), releaseKey: async (k) => op('keyup', { k }), type: async (s) => op('type', { s }) },
   clipboard: { setContent: async (s) => op('clipboard', { len: s.length }) },
   // one shared window (handle 4242) at 100,50 sized 800x600
-  getWindows: async () => [{ windowHandle: 4242, getRegion: async () => ({ left: 100, top: 50, width: 800, height: 600 }), focus: async () => op('focus', { handle: 4242 }) }],
+  getWindows: async () => [{ windowHandle: 4242, getTitle: async () => process.env.HARNESS_TITLE || '', getRegion: async () => ({ left: 100, top: 50, width: 800, height: 600 }), focus: async () => op('focus', { handle: 4242 }) }],
   screen: { width: async () => 1920, height: async () => 1080 },
   Point: function Point(x, y) { this.x = x; this.y = y; },
   Button: { LEFT: 'L', MIDDLE: 'M', RIGHT: 'R' },

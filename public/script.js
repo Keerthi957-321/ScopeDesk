@@ -1,4 +1,4 @@
-window.SCOPEDESK_BUILD = '2026-11-07-v20';
+window.SCOPEDESK_BUILD = '2026-11-07-v21';
 // Safety net: no form on this page may ever submit natively. A native submit reloads the page and looks like a "logout".
 document.addEventListener('submit', (e) => e.preventDefault(), true);
 
@@ -1884,12 +1884,31 @@ document.addEventListener('DOMContentLoaded', () => {
     if ($('btnCopyCheck')) $('btnCopyCheck').addEventListener('click', async () => {
         try { await navigator.clipboard.writeText(controlReport()); toast('Control check copied. Paste it into a message to support.'); } catch (_) { toast('Could not copy.', true); }
     });
-        ScopeDeskDesktop.onStatus((st) => { STATE.desktopAgent = st; if (['starting', 'connected', 'running'].includes(st.phase)) STATE.agentStartError = ''; remoteBusy = false; clearTimeout(busyTimer); renderLiveBar(); });
+        // The control bar's Stop / End do exactly what the big window's buttons do (so the server and the vendor are told)
+        ScopeDeskDesktop.onMiniAction((act) => {
+            if (act === 'stop' && STATE.desktopAgent && ['starting', 'connected', 'running'].includes(STATE.desktopAgent.phase)) $('btnPairAgent').click();
+            else if (act === 'terminate' && STATE.live) terminateTask(STATE.live.taskId);
+        });
+                ScopeDeskDesktop.onStatus((st) => { STATE.desktopAgent = st; if (['starting', 'connected', 'running'].includes(st.phase)) STATE.agentStartError = ''; remoteBusy = false; clearTimeout(busyTimer); renderLiveBar(); });
 
     const AGENT_TEXT = { stopped: 'stopped by you (the vendor can only watch)', unknown: 'not running', offline: 'not running', starting: 'starting...', error: 'could not start', waiting: `waiting for the approved app`, armed: 'Active Secured Session', locked: 'locked after a violation', 'view-only': 'view only (this computer is not allowing control)' };
     const SHARE_TEXT = { idle: 'not shared', starting: 'choosing screen...', waiting: 'shared, waiting for vendor', connecting: 'connecting...', live: 'live', lost: 'connection lost, retrying', stopped: 'stopped', closed: 'closed', expired: 'closed (time up)', violation: 'cut after a violation' };
 
+    // Desktop control bar: show the approved apps and the end time (client side, display only)
+    let miniSig = '';
+    function sendMiniInfo() {
+        if (!STATE.live || !STATE.user || STATE.user.role !== 'client') return;
+        const t = (STATE.tasks || []).find((x) => x.id === STATE.live.taskId);
+        const apps = t ? listOf(t.allowed_apps).join(', ') : (STATE.live.process || '');
+        const endsAt = STATE.live.endMs ? STATE.live.endMs - (STATE.clockOffset || 0) : 0;
+        const sig = `${apps}|${endsAt}`;
+        if (sig === miniSig) return;
+        miniSig = sig;
+        try { ScopeDeskDesktop.setSessionInfo({ apps, endsAt }); } catch (_) { /* browser: no bar */ }
+    }
+
     function renderLiveBar() {
+        sendMiniInfo();
         const bar = $('liveBar');
         if (!bar || !STATE.user || STATE.user.role !== 'client') return;
         const live = STATE.live;

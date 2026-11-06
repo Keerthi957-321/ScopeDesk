@@ -171,6 +171,36 @@ class InputInjector {
     const w = this.ownWindow;
     return !!w && p.x >= w.x && p.x < w.x + w.width && p.y >= w.y && p.y < w.y + w.height;
   }
+  // Would this click really land on ScopeDesk? Only if ScopeDesk is in front, or the point is outside the app that is in front.
+  // (Before: any click inside ScopeDesk's rectangle was dropped, even on Calculator lying ON TOP of a maximised ScopeDesk, so the
+  // vendor could move the cursor but never click into the app, and keys never went through.)
+  hitsOwnWindow(p) {
+    if (!this.insideOwnWindow(p)) return false;
+    const c = this.monitor && this.monitor.cache;
+    if (!c || !c.result || c.result.neutral) return true;            // ScopeDesk itself is in front (or unknown): protect it
+    const b = c.win && c.win.bounds;
+    if (b && p.x >= b.x && p.x < b.x + b.width && p.y >= b.y && p.y < b.y + b.height) return false;   // on the app in front
+    return true;
+  }
+
+  // Bring an approved app's window to the front (when remote control starts and ScopeDesk steps aside). Best effort: matched by
+  // the window title against the approved app names ("Calculator", "Notepad"...). The monitor still checks whatever is in front.
+  async focusApproved(appNames) {
+    if (!this.ready || !nut || typeof nut.getWindows !== 'function') return false;
+    const names = (appNames || []).map((a) => String(a).toLowerCase()).filter((a) => a && a !== 'scopedesk' && a !== 'file manager');
+    if (!names.length) return false;
+    let wins = [];
+    try { wins = (await nut.getWindows()) || []; } catch (_) { return false; }
+    for (const w of wins) {
+      let title = '';
+      try { title = String((typeof w.getTitle === 'function' ? await w.getTitle() : await w.title) || ''); } catch (_) { continue; }
+      const t = title.toLowerCase();
+      if (!t || /scopedesk/.test(t)) continue;
+      if (!names.some((n) => t === n || t.endsWith(' - ' + n) || t.startsWith(n + ' - ') || t.includes(n))) continue;
+      try { if (typeof w.focus === 'function') { await w.focus(); this.log('info', `Brought "${title.slice(0, 60)}" to the front`); if (this.monitor && this.monitor.cache) this.monitor.cache.at = 0; return true; } } catch (_) { /* next */ }
+    }
+    return false;
+  }
 
   // The shared window's current rectangle (it may have moved or been resized since the last event). Cached for 250 ms.
   async windowRect() {
@@ -217,7 +247,7 @@ class InputInjector {
     const p = await this.point(event.x, event.y);
     if (!p) return this.refuse(event, 'The shared window was closed or minimised on the client\'s PC.');
     // Never let the vendor click INSIDE ScopeDesk's own window (Stop / Terminate / alert switches belong to the Client)
-    if (event.t === 'down' && this.insideOwnWindow(p)) { this.droppedButtons.add(event.b); this.log('info', 'Vendor click on the ScopeDesk window ignored'); return this.refuse(event, 'That click was on the client\'s ScopeDesk window, which you may not use. Click the approved app instead.'); }
+    if (event.t === 'down' && this.hitsOwnWindow(p)) { this.droppedButtons.add(event.b); this.log('info', 'Vendor click on the ScopeDesk window ignored'); return this.refuse(event, 'That click was on the client\'s ScopeDesk window, which you may not use. Click the approved app instead.'); }
     if (event.t === 'up' && this.droppedButtons.delete(event.b)) return false;
     await mouse.setPosition(p);
     if (event.t === 'down' && this.windowHandle !== null) {

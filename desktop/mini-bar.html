@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'">
+<title>ScopeDesk control bar</title>
+<style>
+  /* A small always-on-top bar shown while the vendor has control (like AnyDesk's session panel). It never takes keyboard focus,
+     so the vendor's typing keeps going to the approved app. The vendor can never click it (the host agent refuses clicks on it). */
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; font: 13px/1.2 "Segoe UI", -apple-system, system-ui, sans-serif; user-select: none; }
+  .bar { box-sizing: border-box; height: 100%; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; border-radius: 12px;
+         background: #0e1822; color: #f4f6f2; border: 1px solid #2a3a44; -webkit-app-region: drag; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,.25); flex: none; }
+  .text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .text b { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .text span { color: #a9bcb9; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  button { -webkit-app-region: no-drag; font: inherit; font-weight: 700; border: 0; border-radius: 8px; padding: 7px 10px; cursor: pointer; }
+  .show { background: #1f2f39; color: #f4f6f2; }
+  .stop { background: #f59e0b; color: #1b1200; }
+  .end { background: #e11d48; color: #fff; }
+  button:hover { filter: brightness(1.1); }
+</style>
+</head>
+<body>
+  <div class="bar" role="toolbar" aria-label="ScopeDesk remote control">
+    <span class="dot" aria-hidden="true"></span>
+    <div class="text"><b id="title">Vendor has control</b><span id="sub">Only the approved apps</span></div>
+    <button class="show" id="show" title="Open ScopeDesk">Open</button>
+    <button class="stop" id="stop" title="Stop remote control (screen sharing continues)">Stop</button>
+    <button class="end" id="end" title="Terminate the session now">End</button>
+  </div>
+  <script src="mini-bar.js"></script>
+</body>
+</html>

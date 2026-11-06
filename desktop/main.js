@@ -57,12 +57,57 @@ function setTitle(active) { if (win && !win.isDestroyed()) win.setTitle(active ?
 // ScopeDesk's own window position, in the same units the agent's mouse uses. The agent refuses vendor clicks inside it, so the
 // vendor can never press Stop / Terminate / alert switches in the Client's ScopeDesk.
 function ownWindowBounds() {
-  if (!win || win.isDestroyed() || win.isMinimized() || !win.isVisible()) return null;
-  let r = win.getBounds();
-  if (process.platform === 'win32') { try { r = require('electron').screen.dipToScreenRect(win, r); } catch (_) { /* keep DIP */ } }
+  // the main window when it is on screen; while it is minimised for remote control, the small control bar instead
+  let w = win && !win.isDestroyed() && !win.isMinimized() && win.isVisible() ? win : null;
+  if (!w && miniBar && !miniBar.isDestroyed() && miniBar.isVisible()) w = miniBar;
+  if (!w) return null;
+  let r = w.getBounds();
+  if (process.platform === 'win32') { try { r = require('electron').screen.dipToScreenRect(w, r); } catch (_) { /* keep DIP */ } }
   return { x: r.x, y: r.y, width: r.width, height: r.height };
 }
 function reportOwnWindow() { if (runner) runner.setOwnWindow(ownWindowBounds()); }
+
+// ---------- CONTROL BAR (while the vendor has control) ----------
+// Like AnyDesk: when remote control starts, the big ScopeDesk window steps aside (minimised) so the approved app is what the
+// vendor sees and clicks, and a small always-on-top bar stays on the Client's screen with Open / Stop / End and the time left.
+// The bar never takes keyboard focus (focusable: false), so the vendor's typing keeps going to the approved app; the host agent
+// refuses vendor clicks on it, so only the Client can press its buttons. A scope alert brings the full window back.
+let miniBar = null, miniInfo = {}, steppedAside = false;
+function showMiniBar() {
+  if (miniBar && !miniBar.isDestroyed()) { miniBar.showInactive(); return; }
+  const { screen } = require('electron');
+  const area = screen.getPrimaryDisplay().workArea;
+  const width = 460, height = 52;
+  miniBar = new BrowserWindow({
+    width, height, x: Math.round(area.x + (area.width - width) / 2), y: area.y + 8,
+    frame: false, transparent: true, resizable: false, minimizable: false, maximizable: false, fullscreenable: false,
+    alwaysOnTop: true, focusable: false, skipTaskbar: true, show: false, hasShadow: true, title: 'ScopeDesk control bar',
+    webPreferences: { preload: path.join(__dirname, 'mini-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
+  });
+  miniBar.setAlwaysOnTop(true, 'floating');
+  miniBar.loadFile(path.join(__dirname, 'mini-bar.html'));
+  miniBar.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  miniBar.webContents.on('will-navigate', (e) => e.preventDefault());
+  miniBar.once('ready-to-show', () => { if (miniBar && !miniBar.isDestroyed()) { miniBar.showInactive(); miniBar.webContents.send('mini:info', miniInfo); reportOwnWindow(); } });
+  ['move', 'show', 'hide'].forEach((ev) => miniBar.on(ev, reportOwnWindow));
+  miniBar.on('closed', () => { miniBar = null; reportOwnWindow(); });
+}
+function hideMiniBar() { if (miniBar && !miniBar.isDestroyed()) miniBar.close(); miniBar = null; }
+function restoreMain() { if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } }
+// remote control is now running: step aside so the approved app is in front (the agent then brings it forward)
+function stepAside() {
+  if (steppedAside || !win || win.isDestroyed()) return;
+  steppedAside = true;
+  showMiniBar();
+  setTimeout(() => { if (steppedAside && win && !win.isDestroyed()) { win.minimize(); reportOwnWindow(); } }, 400);
+}
+function comeBack() {
+  if (!steppedAside) return;
+  steppedAside = false;
+  hideMiniBar();
+  restoreMain();
+  reportOwnWindow();
+}
 
 function isRazorpayUrl(url) {
   try { const u = new URL(url); return u.protocol === 'https:' && (u.hostname === 'razorpay.com' || u.hostname.endsWith('.razorpay.com')); } catch (_) { return false; }
@@ -159,6 +204,20 @@ function onScopeViolation({ kind, processName, detail }) {
 }
 
 function setupAgentIpc() {
+  // Control bar buttons. Only the bar's own page can send these; Stop and End are carried out by the main page (which tells the
+  // server), so the vendor's screen and the audit log see exactly the same thing as when the Client uses the big window.
+  ipcMain.on('mini:action', (event, a) => {
+    if (!miniBar || miniBar.isDestroyed() || event.sender !== miniBar.webContents) return;
+    if (!['show', 'stop', 'terminate'].includes(a)) return;
+    restoreMain();
+    if (a !== 'show' && win && !win.isDestroyed()) win.webContents.send('mini:action', a);
+  });
+  // Page -> main: what the bar shows (the approved apps and when the time window ends). Display only.
+  ipcMain.on('mini:info', (event, info) => {
+    if (!isTrustedSender(event.senderFrame ? event.senderFrame.url : '', SERVER_URL)) return;
+    miniInfo = { endsAt: Number(info && info.endsAt) || 0, apps: String((info && info.apps) || '').replace(/[\u0000-\u001f]/g, '').slice(0, 80) };
+    if (miniBar && !miniBar.isDestroyed()) miniBar.webContents.send('mini:info', miniInfo);
+  });
   let wasActive = false;
   runner = createAgentRunner({
     agentDir: AGENT_DIR, serverUrl: SERVER_URL,
@@ -168,6 +227,8 @@ function setupAgentIpc() {
       const active = ['connected', 'running', 'starting'].includes(s.phase);
       setTitle(active);
       if (active && !wasActive) notify('ScopeDesk', 'Remote control is active for the approved task. Close ScopeDesk or press Stop to end it.');
+      if (s.phase === 'running' && !steppedAside) stepAside();
+      if (!active && steppedAside) comeBack();
       if (!active && wasActive) {
         // Say WHY: "ended" is for a normal end, an error gets its real reason
         if (s.phase === 'error') notify('ScopeDesk', `Remote control could not run: ${String(s.detail || 'the host agent stopped').slice(0, 200)}`);

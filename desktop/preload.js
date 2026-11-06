@@ -37,5 +37,8 @@ contextBridge.exposeInMainWorld('scopedeskDesktop', {
 
   // Main -> page
   onAgentStatus: (cb) => listen('agent:status', cb),
-  onLockout: (cb) => listen('agent:lockout', cb)    // { kind, processName, detail }: the vendor left the approved scope
+  onLockout: (cb) => listen('agent:lockout', cb),   // { kind, processName, detail }: the vendor left the approved scope
+  // The small control bar shown while the vendor has control: its Stop / End buttons, and what it displays
+  onMiniAction: (cb) => listen('mini:action', cb),  // 'stop' | 'terminate'
+  setSessionInfo: (info) => ipcRenderer.send('mini:info', { endsAt: Number(info && info.endsAt) || 0, apps: String((info && info.apps) || '').slice(0, 80) })
 });

@@ -67,7 +67,13 @@ process.on('message', (m) => {
   // It is schema-checked again in injector.handle(), exactly like input from any other path.
   // The Client chose which display is shared: map the vendor's positions onto it
   if (m.type === 'display') { display = m.display || null; if (injector) { injector.setDisplay(display); announce(); } return; }
-  if (m.type === 'own-window') { ownWindow = m.bounds || null; if (injector) injector.setOwnWindow(ownWindow); return; }
+  if (m.type === 'own-window') {
+    const was = ownWindow;
+    ownWindow = m.bounds || null; if (injector) injector.setOwnWindow(ownWindow);
+    // ScopeDesk just stepped aside (minimised to the control bar): bring the approved app forward so the vendor can work in it
+    if (injector && monitor && monitor.state === 'waiting' && (!was || (ownWindow && ownWindow.width < was.width))) setTimeout(bringApprovedForward, 500);
+    return;
+  }
   if (m.type === 'input' && injector && !ending && typeof m.data === 'string' && m.data.length <= MAX_FRAME) {
     let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
     injector.handle(ev);
@@ -92,6 +98,10 @@ function sendDiag() {
     applied: st.applied || 0, refused: st.refused || 0, refusal: st.reason || '',
     lastApplied: st.appliedAt ? Math.round((now - st.appliedAt) / 1000) : -1, lastRefused: st.refusedAt ? Math.round((now - st.refusedAt) / 1000) : -1
   });
+}
+function bringApprovedForward() {
+  if (!injector || !monitor || monitor.state !== 'waiting' || !livePolicy) return;
+  injector.focusApproved(livePolicy.appList).then((ok) => { if (ok) monitor.poll().catch(() => {}); }).catch(() => {});
 }
 // at most one report a second while the vendor is working
 let diagTimer = null;
@@ -234,6 +244,7 @@ async function onHello(res) {
       if (res.halted) monitor.lock();
       log('info', `Task #${taskId} "${res.title}". Policy: ${policy.name}. Allowed apps: ${policy.appList.join(', ')}.` + (policy.allowedPaths.length ? ` Allowed folders: ${policy.allowedPaths.join(' | ')}.` : ''));
       announce();                                    // the real state: view-only when this PC cannot apply input (or one window is shared)
+      setTimeout(bringApprovedForward, 1200);        // put the approved app (e.g. Calculator) in front, ready for the vendor
 
       // Defence in depth: also stop locally when the window ends, even if the server cannot be reached
       const msLeft = Date.parse(res.windowEnd) - (Date.now() + (res.serverTime - Date.now()));

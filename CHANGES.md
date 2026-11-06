@@ -1,3 +1,13 @@
+# Update 21 (build 2026-11-07-v21): the vendor can click into and type into the approved app (ScopeDesk steps aside)
+
+| Change | Files |
+|---|---|
+| FIX "only the cursor moves": the vendor may never click inside the Client's ScopeDesk window (so they cannot press Stop / Terminate). That check only looked at ScopeDesk's rectangle, so with ScopeDesk maximised every click (even on Calculator lying on top of it) was dropped, Calculator never came to the front, and keys (held back while ScopeDesk is in front) never went through. A click is now dropped only when it would really land on ScopeDesk: ScopeDesk is in front, or the point is outside the app in front | `agent/input-injector.js` |
+| Like AnyDesk: when remote control starts, ScopeDesk minimises and a small always-on-top control bar stays at the top of the Client's screen (Vendor has control, approved apps, time left, Open / Stop / End). The bar never takes keyboard focus, so typing goes to the approved app; the vendor cannot click it; its Stop / End do exactly what the big window's buttons do. A scope alert brings the full window back; when control ends everything is restored | `desktop/main.js`, `desktop/mini-bar.html`, `desktop/mini-bar.js`, `desktop/mini-preload.js`, `desktop/preload.js`, `desktop/package.json`, `public/desktop-bridge.js`, `public/script.js` |
+| The approved app (matched by window title, e.g. "Calculator") is brought to the front when remote control starts and when ScopeDesk steps aside | `agent/input-injector.js`, `agent/client-agent.js` |
+| Approval dialog says what happens | `public/index.html` |
+| Tests: real agent: clicks on Calculator over a maximised ScopeDesk go through and the typed 9 follows; clicks on ScopeDesk are still dropped; the approved app is focused at start. Desktop: the real main.js with a fake Electron (bar unfocusable, shown inactive, protected, buttons only from the bar, everything restored) | `agent/test/remote-control-e2e.test.js`, `agent/test/helpers/real-agent-harness.js`, `desktop/test/control-bar.test.js` |
+
 # Update 20 (build 2026-11-07-v20): the vendor can TYPE into Calculator (and other apps that ignore typed text)
 
 | Change | Files |

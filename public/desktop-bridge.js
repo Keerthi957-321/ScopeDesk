@@ -68,6 +68,9 @@
     stopAgent,
     endTask,
     getStatus: () => status,
-    onStatus(fn) { listeners.push(fn); if (available && status.phase !== 'stopped') fn(status); }
+    onStatus(fn) { listeners.push(fn); if (available && status.phase !== 'stopped') fn(status); },
+    // control bar (desktop app only): its buttons, and the apps + end time it shows
+    onMiniAction(fn) { if (bridge && typeof bridge.onMiniAction === 'function') bridge.onMiniAction(fn); },
+    setSessionInfo(info) { if (bridge && typeof bridge.setSessionInfo === 'function') bridge.setSessionInfo(info); }
   };
 })();
